@@ -2,13 +2,147 @@
 
 Полное руководство по решению проблем при регенерации сертификатов в multi-master Kubernetes кластерах.
 
+## Важная информация о структуре сертификатов
+
+После работы скрипта `apply-all-at-once.sh` каждая master нода использует **hostname-specific** сертификаты etcd.
+
+**Структура на master1:**
+```
+/etc/ssl/etcd/ssl/
+├── ca.pem                       # общий CA для всех нод
+├── ca-key.pem                   # общий CA key для всех нод
+├── member-master1.pem           # etcd server cert для master1
+├── member-master1-key.pem
+├── node-master1.pem             # etcd client cert для API server на master1
+├── node-master1-key.pem
+├── admin-master1.pem            # etcd admin cert для etcdctl на master1
+└── admin-master1-key.pem
+```
+
+**Структура на master2:**
+```
+/etc/ssl/etcd/ssl/
+├── ca.pem                       # общий CA (тот же что на master1)
+├── ca-key.pem
+├── member-master2.pem           # уникальный для master2
+├── member-master2-key.pem
+├── node-master2.pem             # уникальный для master2
+├── node-master2-key.pem
+├── admin-master2.pem            # уникальный для master2
+└── admin-master2-key.pem
+```
+
+**Аналогично для master3** (master3.pem файлы).
+
+**Манифест API Server** на каждой ноде обновляется автоматически:
+- master1: `--etcd-certfile=/etc/ssl/etcd/ssl/node-master1.pem`
+- master2: `--etcd-certfile=/etc/ssl/etcd/ssl/node-master2.pem`
+- master3: `--etcd-certfile=/etc/ssl/etcd/ssl/node-master3.pem`
+
+**Ключевой момент:** Каждая нода имеет ТОЛЬКО свои сертификаты, а не сертификаты всех нод.
+
 ## Содержание
 
-1. [Проблемы при генерации](#проблемы-при-генерации)
-2. [Проблемы при применении](#проблемы-при-применении)
-3. [Проблемы после применения](#проблемы-после-применения)
-4. [Проблемы с etcd](#проблемы-с-etcd)
-5. [Проблемы с кластером](#проблемы-с-кластером)
+1. [Проблемы конфигурации](#проблемы-конфигурации)
+2. [Проблемы при генерации](#проблемы-при-генерации)
+3. [Проблемы при применении](#проблемы-при-применении)
+4. [Проблемы после применения](#проблемы-после-применения)
+5. [Проблемы с etcd](#проблемы-с-etcd)
+6. [Проблемы с кластером](#проблемы-с-кластером)
+
+## Проблемы конфигурации
+
+### Ошибка: "USE_VIP должен быть 'true' или 'false'"
+
+**Полное сообщение:**
+```
+[ERROR] USE_VIP должен быть 'true' или 'false', получено: 'yes'
+```
+
+**Причина:** Неправильное значение в USE_VIP
+
+**Решение:**
+```bash
+# В config/cluster.conf используйте только:
+USE_VIP="true"   # для кластера с VIP
+# ИЛИ
+USE_VIP="false"  # для кластера без VIP
+```
+
+Допустимые значения: `true`, `false`, `yes`, `no`, `1`, `0` (регистр не важен)
+
+### Ошибка: "USE_VIP=true, но LB_VIP не указан"
+
+**Полное сообщение:**
+```
+[ERROR] USE_VIP=true, но LB_VIP не указан
+[ERROR] Укажите LB_VIP в config/cluster.conf или установите USE_VIP=false
+```
+
+**Причина:** Включен режим HA с VIP, но виртуальный IP не указан
+
+**Решение:**
+```bash
+# Вариант 1: Указать VIP
+USE_VIP="true"
+LB_VIP="192.168.88.190"
+
+# Вариант 2: Отключить режим VIP
+USE_VIP="false"
+LB_VIP=""
+```
+
+### Предупреждение: "LB_VIP будет проигнорирован"
+
+**Полное сообщение:**
+```
+[WARNING] USE_VIP=false, но LB_VIP указан (192.168.88.190)
+[WARNING] LB_VIP будет проигнорирован, используется MASTER_IP: 192.168.88.191
+```
+
+**Причина:** Указан VIP, но режим HA отключен
+
+**Объяснение:** Это предупреждение, не ошибка. Скрипт использует MASTER_IP вместо LB_VIP.
+
+**Решение (опционально):**
+```bash
+# Очистить неиспользуемую переменную для чистоты конфига
+LB_VIP=""
+LB_DNS=""
+```
+
+### Проблема: kubectl подключается, но VIP не работает
+
+**Симптомы:**
+```
+# С master IP работает
+kubectl --server=https://192.168.88.191:6443 get nodes
+
+# С VIP не работает
+kubectl --server=https://192.168.88.190:6443 get nodes
+Error: x509: certificate is valid for ..., not 192.168.88.190
+```
+
+**Причина:** USE_VIP был установлен в `false` при генерации сертификатов, VIP не добавлен в SAN
+
+**Решение:**
+```bash
+# 1. Установить USE_VIP=true
+echo 'USE_VIP="true"' >> config/cluster.conf
+
+# 2. Перегенерировать API server сертификаты
+./scripts/generate-apiserver.sh
+
+# 3. Скопировать на все master ноды
+for ip in 192.168.88.191 192.168.88.192 192.168.88.193; do
+  scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver.crt root@$ip:/etc/kubernetes/ssl/
+  scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver.key root@$ip:/etc/kubernetes/ssl/
+  ssh -i ~/.ssh/id_ed25519 root@$ip "crictl rm -f \$(crictl ps -a | grep kube-apiserver | awk '{print \$1}')"
+done
+
+# 4. Проверить SAN в сертификате
+ssh root@192.168.88.191 "openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -text | grep -A1 'Subject Alternative Name'"
+```
 
 ## Проблемы при генерации
 
@@ -54,22 +188,6 @@ ls -la certs/front-proxy/
 ```bash
 ls -la certs/kubelet/
 # Должны быть директории для всех master и worker нод
-```
-
-**Решение:**
-Проверьте что скрипт `generate-kubelet.sh` содержит:
-```bash
-# Для master нод
-for node in $MASTER_NODES; do
-    IFS=':' read -r hostname ip <<< "$node"
-    generate_kubelet_cert "$hostname" "$ip"
-done
-
-# Для worker нод
-for node in $WORKER_NODES; do
-    IFS=':' read -r hostname ip <<< "$node"
-    generate_kubelet_cert "$hostname" "$ip"
-done
 ```
 
 ## Проблемы при применении
@@ -132,10 +250,19 @@ Unable to connect to the server: x509: certificate signed by unknown authority
 
 **Решение:**
 ```bash
-# Скачать новый kubeconfig
+# Скачать новый kubeconfig с master ноды
 scp -i ~/.ssh/id_ed25519 root@192.168.88.191:/etc/kubernetes/admin.conf ~/.kube/config
 
-# Или обновить только CA
+# ВАЖНО: Проверить server URL в новом kubeconfig
+kubectl config view --minify | grep server:
+
+# Должно быть:
+# - USE_VIP=true:  server: https://192.168.88.190:6443 (VIP)
+# - USE_VIP=false: server: https://192.168.88.191:6443 (MASTER_IP)
+```
+
+**Альтернативное решение (обновить только CA):**
+```bash
 # Получить новый CA в base64
 CA_BASE64=$(ssh root@192.168.88.191 "base64 -w 0 /etc/kubernetes/ssl/ca.crt")
 
@@ -216,14 +343,25 @@ tls: failed to verify certificate: x509: certificate signed by unknown authority
 
 **Решение:**
 ```bash
-# Проверить etcd клиентские сертификаты
-ssh root@master2 "ls -la /etc/ssl/etcd/ssl/node-master1*"
+# ВАЖНО: Скрипт apply-all-at-once.sh использует hostname-specific имена
+# Каждая нода использует свой сертификат: node-master1.pem, node-master2.pem, node-master3.pem
 
-# Если файлов нет или они старые, скопировать новые
-scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.crt root@master2:/etc/ssl/etcd/ssl/node-master1.pem
-scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.key root@master2:/etc/ssl/etcd/ssl/node-master1-key.pem
+# Проверить etcd клиентские сертификаты на master2
+ssh root@master2 "ls -la /etc/ssl/etcd/ssl/node-master*"
 
-ssh root@master2 "chmod 700 /etc/ssl/etcd/ssl/node-master1*.pem && chown etcd:root /etc/ssl/etcd/ssl/node-master1*.pem"
+# Если файлов нет или они старые, скопировать новые с правильным именем
+scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.crt root@master2:/etc/ssl/etcd/ssl/node-master2.pem
+scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.key root@master2:/etc/ssl/etcd/ssl/node-master2-key.pem
+
+ssh root@master2 "chmod 700 /etc/ssl/etcd/ssl/node-master2*.pem && chown etcd:root /etc/ssl/etcd/ssl/node-master2*.pem"
+
+# Убедиться что манифест API server использует правильный путь
+ssh root@master2 "grep 'etcd-certfile' /etc/kubernetes/manifests/kube-apiserver.yaml"
+# Должно быть: --etcd-certfile=/etc/ssl/etcd/ssl/node-master2.pem
+
+# Если путь неправильный, обновить манифест
+ssh root@master2 "sed -i 's|/etc/ssl/etcd/ssl/node-master1.pem|/etc/ssl/etcd/ssl/node-master2.pem|g' /etc/kubernetes/manifests/kube-apiserver.yaml"
+ssh root@master2 "sed -i 's|/etc/ssl/etcd/ssl/node-master1-key.pem|/etc/ssl/etcd/ssl/node-master2-key.pem|g' /etc/kubernetes/manifests/kube-apiserver.yaml"
 
 # Перезапустить API server pod
 ssh root@master2 "crictl rm -f \$(crictl ps -a | grep kube-apiserver | awk '{print \$1}')"
@@ -240,7 +378,9 @@ ssh root@master2 "ls -la /etc/kubernetes/ssl/"
 ssh root@master2 "openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -dates"
 ```
 
-### kube-vip не работает
+### kube-vip не работает (только для USE_VIP=true)
+
+**Примечание:** Эта проблема актуальна только если в конфигурации `USE_VIP="true"`
 
 **Симптомы:**
 ```
@@ -249,6 +389,9 @@ error retrieving resource lock: Unauthorized
 
 **Диагностика:**
 ```bash
+# Проверить что USE_VIP включен
+grep USE_VIP config/cluster.conf
+
 # Проверить логи kube-vip
 ssh root@master1 "crictl logs --tail=30 \$(crictl ps | grep kube-vip | awk '{print \$1}')"
 ```
@@ -268,11 +411,14 @@ done
 # Подождать 30 секунд
 sleep 30
 
-# Проверить VIP
+# Проверить VIP (используйте ваш LB_VIP из конфига)
 curl -k https://192.168.88.190:6443/version
 ```
 
-### Проблема 7: Pods в ContainerCreating с ошибкой сертификата
+**Если USE_VIP=false:**
+kube-vip не используется, VIP не настроен. Доступ к API Server осуществляется через MASTER_IP.
+
+### Pods в ContainerCreating с ошибкой сертификата
 
 **Симптомы:**
 ```
@@ -287,25 +433,35 @@ tls: failed to verify certificate: x509: certificate is valid for 192.168.88.191
 192.168.88.191, 192.168.88.192, 192.168.88.193, 127.0.0.1, 10.96.0.1, not 10.233.0.1
 ```
 
-**Причина 1:** API server сертификат не включает ClusterIP service (10.233.0.1)
+**Причина 1:** API server сертификат не включает ClusterIP kubernetes service (10.233.0.1)
 
 **Решение:**
 ```bash
-# Проверить реальный ClusterIP kubernetes service
+# 1. Проверить реальный ClusterIP kubernetes service
 kubectl get svc kubernetes -o yaml | grep clusterIP
 
-# Обновить config/cluster.conf
-# Изменить SERVICE_CIDR и API_SERVER_SANS на правильный IP (например 10.233.0.1)
+# 2. Обновить config/cluster.conf
+# Добавить правильный ClusterIP в API_SERVER_SANS (например 10.233.0.1)
+# Пример:
+# API_SERVER_SANS="kubernetes kubernetes.default ... 10.233.0.1"
 
-# Перегенерировать API server сертификаты
+# 3. Перегенерировать API server сертификаты
 ./scripts/generate-apiserver.sh
 
-# Скопировать на все master ноды
+# Скрипт автоматически добавит:
+# - LB_VIP и LB_DNS (если USE_VIP=true)
+# - MASTER_IP
+# - Все значения из API_SERVER_SANS
+
+# 4. Скопировать на все master ноды
 for ip in 192.168.88.191 192.168.88.192 192.168.88.193; do
   scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver.crt root@$ip:/etc/kubernetes/ssl/apiserver.crt
   scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver.key root@$ip:/etc/kubernetes/ssl/apiserver.key
   ssh -i ~/.ssh/id_ed25519 root@$ip "crictl rm -f \$(crictl ps -a | grep kube-apiserver | awk '{print \$1}')"
 done
+
+# 5. Проверить SAN в новом сертификате
+ssh root@192.168.88.191 "openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -text | grep -A2 'Subject Alternative Name'"
 ```
 
 **Причина 2:** Calico CNI кеширует старый CA certificate
@@ -380,7 +536,7 @@ ssh root@master1 "systemctl status etcd"
 # Проверить etcd логи
 ssh root@master1 "journalctl -u etcd -n 100"
 
-# Попробовать health check с localhost
+# Попробовать health check с localhost (с master1)
 ssh root@master1 "
   ETCDCTL_API=3 etcdctl \
     --endpoints=https://127.0.0.1:2379 \
@@ -389,6 +545,10 @@ ssh root@master1 "
     --key=/etc/ssl/etcd/ssl/admin-master1-key.pem \
     endpoint health
 "
+
+# Для проверки с других мастеров используйте соответствующий сертификат:
+# master2: --cert=/etc/ssl/etcd/ssl/admin-master2.pem --key=/etc/ssl/etcd/ssl/admin-master2-key.pem
+# master3: --cert=/etc/ssl/etcd/ssl/admin-master3.pem --key=/etc/ssl/etcd/ssl/admin-master3-key.pem
 ```
 
 **Решение:**
@@ -478,25 +638,42 @@ kubectl get nodes
 # 2. Проверка pods
 kubectl get pods -A | grep -v Running
 
-# 3. Проверка etcd
-ETCDCTL_API=3 etcdctl \
-  --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
-  --cacert=/etc/ssl/etcd/ssl/ca.pem \
-  --cert=/etc/ssl/etcd/ssl/admin-master1.pem \
-  --key=/etc/ssl/etcd/ssl/admin-master1-key.pem \
-  endpoint health
+# 3. Проверка etcd (запускать с master1)
+ssh root@192.168.88.191 "
+  ETCDCTL_API=3 etcdctl \
+    --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
+    --cacert=/etc/ssl/etcd/ssl/ca.pem \
+    --cert=/etc/ssl/etcd/ssl/admin-master1.pem \
+    --key=/etc/ssl/etcd/ssl/admin-master1-key.pem \
+    endpoint health
+"
 
-# 4. Проверка VIP
-curl -k https://192.168.88.190:6443/version
+# 4. Проверка VIP (только если USE_VIP=true)
+# Замените 192.168.88.190 на ваш LB_VIP из config/cluster.conf
+if grep -q 'USE_VIP="true"' config/cluster.conf; then
+  LB_VIP=$(grep '^LB_VIP=' config/cluster.conf | cut -d'"' -f2)
+  echo "Проверка VIP: $LB_VIP"
+  curl -k https://$LB_VIP:6443/version
+else
+  echo "USE_VIP=false, пропускаем проверку VIP"
+fi
 
 # 5. Проверка сертификатов
 for node in 192.168.88.191 192.168.88.192 192.168.88.193; do
   echo "=== $node ==="
   ssh root@$node "openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -dates"
 done
+
+# 6. Проверка SAN в сертификате (какие IP/DNS включены)
+ssh root@192.168.88.191 "openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -text | grep -A2 'Subject Alternative Name'"
 ```
 
 ## Полезные команды для диагностики
+
+**ВАЖНО:** Каждая master нода использует hostname-specific сертификаты etcd:
+- master1: `node-master1.pem`, `member-master1.pem`, `admin-master1.pem`
+- master2: `node-master2.pem`, `member-master2.pem`, `admin-master2.pem`
+- master3: `node-master3.pem`, `member-master3.pem`, `admin-master3.pem`
 
 ```bash
 # Проверка всех сертификатов на ноде
@@ -549,8 +726,26 @@ scp root@<node>:/tmp/*.log ./logs/
 ## Превентивные меры
 
 1. **ВСЕГДА делайте backup перед применением**
-2. **Тестируйте в staging окружении**
-3. **Используйте `apply-all-at-once.sh` для multi-master**
-4. **Проверяйте сертификаты после генерации**: `./scripts/verify-certs.sh`
-5. **Запускайте в maintenance window**
-6. **Имейте план отката**
+2. **Проверьте конфигурацию перед генерацией**:
+   ```bash
+   # Убедитесь что USE_VIP установлен правильно
+   grep -E 'USE_VIP|LB_VIP|MASTER_IP' config/cluster.conf
+
+   # Для кластера с VIP (kube-vip, haproxy):
+   USE_VIP="true"
+   LB_VIP="192.168.88.190"
+
+   # Для кластера без VIP (single master или прямой доступ):
+   USE_VIP="false"
+   LB_VIP=""
+   ```
+3. **Тестируйте в staging окружении**
+4. **Используйте `apply-all-at-once.sh` для multi-master**
+5. **Проверяйте сертификаты после генерации**: `./scripts/verify-certs.sh`
+6. **Проверяйте SAN в сертификате**:
+   ```bash
+   openssl x509 -in certs/apiserver/apiserver.crt -noout -text | grep -A2 'Subject Alternative Name'
+   # Должны быть включены все необходимые IP и DNS
+   ```
+7. **Запускайте в maintenance window**
+8. **Имейте план отката**

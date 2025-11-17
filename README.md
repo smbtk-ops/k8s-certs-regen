@@ -145,13 +145,15 @@ kubectl get nodes
 # Проверка всех pods
 kubectl get pods -A
 
-# Проверка etcd health
-ETCDCTL_API=3 etcdctl \
-  --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
-  --cacert=/etc/ssl/etcd/ssl/ca.pem \
-  --cert=/etc/ssl/etcd/ssl/admin-master1.pem \
-  --key=/etc/ssl/etcd/ssl/admin-master1-key.pem \
-  endpoint health
+# Проверка etcd health (запускать с master1)
+ssh root@192.168.88.191 "
+  ETCDCTL_API=3 etcdctl \
+    --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
+    --cacert=/etc/ssl/etcd/ssl/ca.pem \
+    --cert=/etc/ssl/etcd/ssl/admin-master1.pem \
+    --key=/etc/ssl/etcd/ssl/admin-master1-key.pem \
+    endpoint health
+"
 
 # Проверка срока действия сертификата
 openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -dates
@@ -229,28 +231,38 @@ kube-apiserver-master2   0/1   CrashLoopBackOff
 tls: failed to verify certificate: x509: certificate signed by unknown authority
 ```
 
-**Причина:** API server не может подключиться к etcd. В kubespray все ноды используют файл `node-master1.pem` вместо node-specific сертификатов.
+**Причина:** API server не может подключиться к etcd из-за неправильных сертификатов.
 
 **Решение:**
 ```bash
-# Скопировать правильный etcd client cert на master2 и master3
-scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.crt root@192.168.88.192:/etc/ssl/etcd/ssl/node-master1.pem
-scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.key root@192.168.88.192:/etc/ssl/etcd/ssl/node-master1-key.pem
+# ВАЖНО: Скрипт apply-all-at-once.sh использует hostname-specific имена для сертификатов
+# После работы скрипта каждая нода использует свой файл:
+# master1: /etc/ssl/etcd/ssl/node-master1.pem
+# master2: /etc/ssl/etcd/ssl/node-master2.pem
+# master3: /etc/ssl/etcd/ssl/node-master3.pem
 
-ssh root@192.168.88.192 "chmod 700 /etc/ssl/etcd/ssl/node-master1*.pem && chown etcd:root /etc/ssl/etcd/ssl/node-master1*.pem"
+# Если нужно исправить вручную, скопируйте сертификаты с правильными именами:
+scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.crt root@192.168.88.192:/etc/ssl/etcd/ssl/node-master2.pem
+scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.key root@192.168.88.192:/etc/ssl/etcd/ssl/node-master2-key.pem
+
+ssh root@192.168.88.192 "chmod 700 /etc/ssl/etcd/ssl/node-master2*.pem && chown etcd:root /etc/ssl/etcd/ssl/node-master2*.pem"
 
 # Повторить для master3
-scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.crt root@192.168.88.193:/etc/ssl/etcd/ssl/node-master1.pem
-scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.key root@192.168.88.193:/etc/ssl/etcd/ssl/node-master1-key.pem
+scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.crt root@192.168.88.193:/etc/ssl/etcd/ssl/node-master3.pem
+scp -i ~/.ssh/id_ed25519 certs/apiserver/apiserver-etcd-client.key root@192.168.88.193:/etc/ssl/etcd/ssl/node-master3-key.pem
 
-ssh root@192.168.88.193 "chmod 700 /etc/ssl/etcd/ssl/node-master1*.pem && chown etcd:root /etc/ssl/etcd/ssl/node-master1*.pem"
+ssh root@192.168.88.193 "chmod 700 /etc/ssl/etcd/ssl/node-master3*.pem && chown etcd:root /etc/ssl/etcd/ssl/node-master3*.pem"
+
+# Убедитесь что манифест API server использует правильный путь к сертификату
+ssh root@192.168.88.192 "grep 'etcd-certfile' /etc/kubernetes/manifests/kube-apiserver.yaml"
+# Должно быть: --etcd-certfile=/etc/ssl/etcd/ssl/node-master2.pem
 
 # Перезапустить API server pods
 ssh root@192.168.88.192 "crictl rm -f \$(crictl ps -a | grep kube-apiserver | awk '{print \$1}')"
 ssh root@192.168.88.193 "crictl rm -f \$(crictl ps -a | grep kube-apiserver | awk '{print \$1}')"
 ```
 
-**Примечание:** Скрипт `apply-all-at-once.sh` уже делает это автоматически. Эта инструкция для ручного исправления.
+**Примечание:** Скрипт `apply-all-at-once.sh` делает это автоматически и обновляет манифесты. Эта инструкция для ручного исправления.
 
 ### Проблема 4: etcd не стартует после обновления
 
@@ -369,8 +381,11 @@ systemctl start kubelet
 5. **Worker ноды**
    Обновляются автоматически в конце процесса
 
-6. **Kubespray quirk**
-   Все ноды используют `node-master1.pem` для etcd - это норма
+6. **Именование сертификатов etcd**
+   Каждая master нода использует hostname-specific сертификаты:
+   - master1: `node-master1.pem`, `member-master1.pem`, `admin-master1.pem`
+   - master2: `node-master2.pem`, `member-master2.pem`, `admin-master2.pem`
+   - master3: `node-master3.pem`, `member-master3.pem`, `admin-master3.pem`
 
 7. **Режим VIP**
    - Установите `USE_VIP="true"` для multi-master с VIP (kube-vip, haproxy)
