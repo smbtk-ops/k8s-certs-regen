@@ -46,7 +46,7 @@ USE_VIP="true"
 #    LB_VIP="api.cluster.local"  # DNS имя вместо IP
 #    LB_DNS="api.cluster.local"
 LB_VIP="192.168.88.190"
-LB_DNS="cluster.local"
+LB_DNS=""  # Оставьте пустым если нет DNS записи для VIP
 
 # Параметры сети (нужно проверить в кластере)
 # Получено: kubectl get svc -n kube-system coredns -o jsonpath='{.spec.clusterIP}'
