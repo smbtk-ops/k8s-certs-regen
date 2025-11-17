@@ -19,9 +19,32 @@ MASTER_NODES="master1:192.168.88.191 master2:192.168.88.192 master3:192.168.88.1
 MASTER_IP="192.168.88.191"
 MASTER_HOSTNAME="master1"
 
+# High Availability режим
+# Указывает используется ли VIP (виртуальный IP) для доступа к API Server
+# true  - Multi-master кластер с VIP (kube-vip, haproxy, keepalived)
+# false - Single master или multi-master без VIP (доступ через IP первого master)
+USE_VIP="true"
+
 # Load Balancer (VIP и DNS для доступа к API Server)
+# Используется только если USE_VIP="true"
 # Получено: из kubeconfig поля cluster.server (https://192.168.88.190:6443)
 # Команда: kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
+#
+# Примеры конфигурации:
+# 1. Multi-master с kube-vip:
+#    USE_VIP="true"
+#    LB_VIP="192.168.88.190"
+#    LB_DNS="cluster.local"
+#
+# 2. Single master без VIP:
+#    USE_VIP="false"
+#    LB_VIP=""
+#    LB_DNS=""
+#
+# 3. Multi-master с DNS балансировкой:
+#    USE_VIP="true"
+#    LB_VIP="api.cluster.local"  # DNS имя вместо IP
+#    LB_DNS="api.cluster.local"
 LB_VIP="192.168.88.190"
 LB_DNS="cluster.local"
 

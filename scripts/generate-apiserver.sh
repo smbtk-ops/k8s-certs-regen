@@ -13,12 +13,31 @@ APISERVER_DIR="$PROJECT_DIR/certs/apiserver"
 
 log_info "Генерация сертификатов API Server"
 
+# Валидация VIP конфигурации
+validate_vip_config
+
 # Подготовка SAN списка
 SAN_LIST=()
 SAN_LIST+=("$MASTER_IP")
+
+# Автоматическое добавление VIP в SAN если включен режим HA
+if [[ "$USE_VIP" == "true" ]]; then
+    if [[ -n "${LB_VIP:-}" ]]; then
+        SAN_LIST+=("$LB_VIP")
+        log_info "Добавлен LB_VIP в SAN: $LB_VIP"
+    fi
+    if [[ -n "${LB_DNS:-}" ]]; then
+        SAN_LIST+=("$LB_DNS")
+        log_info "Добавлен LB_DNS в SAN: $LB_DNS"
+    fi
+fi
+
+# Добавление дополнительных SAN из конфигурации
 for san in $API_SERVER_SANS; do
     SAN_LIST+=("$san")
 done
+
+log_info "Всего записей в SAN: ${#SAN_LIST[@]}"
 
 # 1. Генерация API Server сертификата
 log_info "Генерация API Server сертификата"

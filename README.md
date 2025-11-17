@@ -36,8 +36,14 @@ WORKER_NODES="worker1:192.168.88.194 worker2:192.168.88.195"
 # etcd ноды (обычно совпадает с MASTER_NODES)
 ETCD_NODES="master1:192.168.88.191 master2:192.168.88.192 master3:192.168.88.193"
 
-# Виртуальный IP (kube-vip)
+# НОВОЕ: Режим High Availability
+# true  - Multi-master с VIP (kube-vip, haproxy, keepalived)
+# false - Single master или multi-master без VIP
+USE_VIP="true"
+
+# Виртуальный IP (используется если USE_VIP="true")
 LB_VIP="192.168.88.190"
+LB_DNS="cluster.local"
 
 # ВАЖНО: Проверить реальный ClusterIP kubernetes service
 # kubectl get svc kubernetes -o yaml | grep clusterIP
@@ -52,6 +58,36 @@ CERT_VALIDITY_DAYS=36500
 SSH_KEY_PATH="~/.ssh/id_ed25519"
 SSH_USER="root"
 ```
+
+**Примеры конфигурации для разных сценариев:**
+
+**Сценарий 1: Multi-master HA кластер с kube-vip**
+```bash
+USE_VIP="true"
+LB_VIP="192.168.88.190"
+LB_DNS="cluster.local"
+MASTER_NODES="master1:192.168.88.191 master2:192.168.88.192 master3:192.168.88.193"
+```
+Скрипт автоматически добавит `LB_VIP` в SAN сертификата API server.
+Admin kubeconfig будет использовать `https://192.168.88.190:6443`.
+
+**Сценарий 2: Single master кластер**
+```bash
+USE_VIP="false"
+LB_VIP=""
+LB_DNS=""
+MASTER_NODES="master1:192.168.88.191"
+MASTER_IP="192.168.88.191"
+```
+Admin kubeconfig будет использовать `https://192.168.88.191:6443`.
+
+**Сценарий 3: Multi-master с DNS балансировкой (без VIP)**
+```bash
+USE_VIP="true"
+LB_VIP="api.cluster.local"  # DNS имя вместо IP
+LB_DNS="api.cluster.local"
+```
+Скрипт добавит DNS имя в SAN сертификата.
 
 ### 2. Генерация сертификатов
 
@@ -318,24 +354,26 @@ systemctl start kubelet
 
 ## Важные замечания
 
-1. **ОБЯЗАТЕЛЬНО создайте backup перед применением**  
+1. **ОБЯЗАТЕЛЬНО создайте backup перед применением**
    Скрипт создает автоматический backup на каждой ноде
 
-2. **Планируйте maintenance window**  
+2. **Планируйте maintenance window**
    Кластер будет недоступен 5-10 минут
 
-3. **Срок действия сертификатов**  
+3. **Срок действия сертификатов**
    По умолчанию 10 лет, можно настроить в `CERT_VALIDITY_DAYS`
 
-4. **Multi-master особенность**  
+4. **Multi-master особенность**
    etcd требует одновременного обновления всех master нод
 
-5. **Worker ноды**  
+5. **Worker ноды**
    Обновляются автоматически в конце процесса
 
-6. **Kubespray quirk**  
+6. **Kubespray quirk**
    Все ноды используют `node-master1.pem` для etcd - это норма
 
-## Лицензия
-
-MIT
+7. **Режим VIP**
+   - Установите `USE_VIP="true"` для multi-master с VIP (kube-vip, haproxy)
+   - Установите `USE_VIP="false"` для single-master или без VIP
+   - Если `USE_VIP="true"`, то `LB_VIP` автоматически добавляется в SAN сертификата
+   - Admin kubeconfig использует VIP или MASTER_IP в зависимости от `USE_VIP`

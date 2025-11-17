@@ -23,6 +23,9 @@ source "$CONFIG_FILE"
 # Проверка необходимых переменных
 check_required_vars
 
+# Валидация конфигурации VIP (также выводит режим работы)
+validate_vip_config
+
 # Проверка наличия необходимых инструментов
 check_requirements
 

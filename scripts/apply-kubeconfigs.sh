@@ -18,6 +18,18 @@ fi
 
 source "$CONFIG_FILE"
 
+# Валидация VIP конфигурации
+validate_vip_config
+
+# Определение API Server endpoint для admin kubeconfig
+if [[ "$USE_VIP" == "true" ]]; then
+    API_SERVER_ENDPOINT="$LB_VIP"
+    log_info "Admin kubeconfig будет использовать VIP: $API_SERVER_ENDPOINT"
+else
+    API_SERVER_ENDPOINT="$MASTER_IP"
+    log_info "Admin kubeconfig будет использовать MASTER_IP: $API_SERVER_ENDPOINT"
+fi
+
 # Применение kubeconfig на всех master нодах
 for node in $MASTER_NODES; do
     IFS=':' read -r hostname ip <<< "$node"
@@ -36,9 +48,9 @@ for node in $MASTER_NODES; do
     cp "$PROJECT_DIR/certs/controller-manager/controller-manager.conf" "$tmp_dir/controller-manager.conf"
     cp "$PROJECT_DIR/certs/scheduler/scheduler.conf" "$tmp_dir/scheduler.conf"
 
-    # Изменим server URL на VIP для admin и super-admin
-    sed -i.bak "s|server: https://.*:6443|server: https://${LB_VIP}:6443|" "$tmp_dir/admin.conf"
-    sed -i.bak "s|server: https://.*:6443|server: https://${LB_VIP}:6443|" "$tmp_dir/super-admin.conf"
+    # Изменим server URL для admin и super-admin (VIP или MASTER_IP в зависимости от конфигурации)
+    sed -i.bak "s|server: https://.*:6443|server: https://${API_SERVER_ENDPOINT}:6443|" "$tmp_dir/admin.conf"
+    sed -i.bak "s|server: https://.*:6443|server: https://${API_SERVER_ENDPOINT}:6443|" "$tmp_dir/super-admin.conf"
 
     # Для остальных используем localhost
     sed -i.bak "s|server: https://.*:6443|server: https://127.0.0.1:6443|" "$tmp_dir/controller-manager.conf"

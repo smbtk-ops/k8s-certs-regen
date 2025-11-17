@@ -54,6 +54,7 @@ check_required_vars() {
         "STATE"
         "LOCALITY"
         "ORGANIZATION"
+        "USE_VIP"
     )
 
     local missing=0
@@ -66,6 +67,41 @@ check_required_vars() {
 
     if [[ $missing -eq 1 ]]; then
         exit 1
+    fi
+}
+
+# Валидация конфигурации VIP
+validate_vip_config() {
+    local use_vip="${USE_VIP:-false}"
+
+    # Нормализация значения USE_VIP (поддержка true/false, yes/no, 1/0)
+    case "${use_vip,,}" in
+        true|yes|1)
+            USE_VIP="true"
+            ;;
+        false|no|0)
+            USE_VIP="false"
+            ;;
+        *)
+            log_error "USE_VIP должен быть 'true' или 'false', получено: '$use_vip'"
+            exit 1
+            ;;
+    esac
+
+    # Проверка если USE_VIP=true
+    if [[ "$USE_VIP" == "true" ]]; then
+        if [[ -z "${LB_VIP:-}" ]]; then
+            log_error "USE_VIP=true, но LB_VIP не указан"
+            log_error "Укажите LB_VIP в config/cluster.conf или установите USE_VIP=false"
+            exit 1
+        fi
+        log_info "Режим HA с VIP: $LB_VIP"
+    else
+        if [[ -n "${LB_VIP:-}" ]]; then
+            log_warning "USE_VIP=false, но LB_VIP указан ($LB_VIP)"
+            log_warning "LB_VIP будет проигнорирован, используется MASTER_IP: $MASTER_IP"
+        fi
+        log_info "Режим без VIP: используется MASTER_IP: $MASTER_IP"
     fi
 }
 
