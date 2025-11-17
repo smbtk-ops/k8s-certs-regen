@@ -1,0 +1,28 @@
+# Сертификаты и ключи
+certs/
+*.crt
+*.key
+*.csr
+*.pub
+*.pem
+*.conf
+!config/*.example
+!config/*.conf.example
+
+# Резервные копии
+backup/
+
+# Временные файлы
+*.tmp
+*.bak
+*.swp
+*~
+
+# Логи
+*.log
+
+# OpenSSL конфигурационные файлы (генерируемые)
+scripts/*.conf
+
+# Персональная конфигурация
+config/cluster.conf

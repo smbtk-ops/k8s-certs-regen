@@ -1,0 +1,124 @@
+# Конфигурация Multi-Master Kubernetes кластера
+# Скопируйте этот файл в cluster.conf и отредактируйте под ваш кластер
+
+# Базовая информация о кластере
+# Получено: из kubeconfig поля cluster.name
+CLUSTER_NAME="cluster.local"
+
+# Получено: kubectl version --short | grep Server
+KUBERNETES_VERSION="1.32"
+
+# Master ноды (список всех master нод)
+# Формат: "hostname:ip hostname:ip ..."
+# Получено: kubectl get nodes -o wide | grep control-plane
+# Команда: kubectl get nodes -o custom-columns=NAME:.metadata.name,IP:.status.addresses[0].address,ROLE:.metadata.labels.node-role\.kubernetes\.io/control-plane
+MASTER_NODES="master1:192.168.88.191 master2:192.168.88.192 master3:192.168.88.193"
+
+# Первая master нода (текущая, на которой выполняется генерация)
+# Получено: hostname на текущей ноде или выбрана первая из списка
+MASTER_IP="192.168.88.191"
+MASTER_HOSTNAME="master1"
+
+# Load Balancer (VIP и DNS для доступа к API Server)
+# Получено: из kubeconfig поля cluster.server (https://192.168.88.190:6443)
+# Команда: kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
+LB_VIP="192.168.88.190"
+LB_DNS="cluster.local"
+
+# Параметры сети (нужно проверить в кластере)
+# Получено: kubectl get svc -n kube-system coredns -o jsonpath='{.spec.clusterIP}'
+# Альтернатива: kubectl get svc -n kube-system kube-dns -o jsonpath='{.spec.clusterIP}' (для старых кластеров)
+# Примечание: cat /var/lib/kubelet/config.yaml | grep -A1 clusterDNS может показать nodelocaldns IP (169.254.25.10), а не ClusterIP
+CLUSTER_DNS="10.233.0.3"
+
+# Получено: kubectl cluster-info dump | grep -m 1 service-cluster-ip-range
+# Альтернатива: ssh master1 "ps aux | grep kube-apiserver | grep service-cluster-ip-range"
+SERVICE_CIDR="10.233.0.0/18"
+
+# Получено: kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}' (если указано)
+# Альтернатива: kubectl get cm -n kube-system kubeadm-config -o yaml | grep podSubnet
+# Для Calico: kubectl get ippool -o yaml | grep cidr
+POD_CIDR="10.233.64.0/18"
+
+# API Server SAN (Subject Alternative Names)
+# Включаем ВСЕ: LB, все мастеры, service IP, localhost
+# Получено: комбинация из:
+# - LB_VIP и LB_DNS
+# - MASTER_NODES IPs
+# - первый IP из SERVICE_CIDR (обычно 10.233.0.1) - kubectl get svc kubernetes -o yaml | grep clusterIP
+# - стандартные kubernetes DNS имена
+# Проверить текущие SAN: ssh master1 "openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -text | grep -A1 'Subject Alternative Name'"
+API_SERVER_SANS="kubernetes kubernetes.default kubernetes.default.svc kubernetes.default.svc.cluster.local cluster.local 192.168.88.190 192.168.88.191 192.168.88.192 192.168.88.193 127.0.0.1 10.233.0.1"
+
+# Worker ноды (список всех worker нод для генерации kubelet сертификатов)
+# Формат: "hostname:ip hostname:ip ..."
+# Получено: kubectl get nodes -o wide | grep -v control-plane
+# Команда: kubectl get nodes -o custom-columns=NAME:.metadata.name,IP:.status.addresses[0].address,ROLE:.metadata.labels --no-headers | grep -v control-plane
+WORKER_NODES="worker1:192.168.88.194 worker2:192.168.88.195"
+
+# etcd узлы (совпадает с master нодами)
+# Формат: "hostname:ip hostname:ip ..."
+# Получено: ssh master1 "grep ETCD_INITIAL_CLUSTER /etc/etcd.env"
+# Порядок согласно ETCD_INITIAL_CLUSTER: etcd1=https://192.168.88.191:2380,etcd2=https://192.168.88.193:2380,etcd3=https://192.168.88.192:2380
+ETCD_NODES="master1:192.168.88.191 master3:192.168.88.193 master2:192.168.88.192"
+
+# etcd имена узлов (для кластера)
+# Получено: ssh master1 "grep ETCD_NAME /etc/etcd.env" на каждой ноде
+# Или из ETCD_INITIAL_CLUSTER
+ETCD_NAMES="etcd1 etcd2 etcd3"
+
+# Срок действия сертификатов (в днях)
+# Настраивается по необходимости, стандарт - 1 год (365), рекомендуется 10 лет для упрощения
+CERT_VALIDITY_DAYS=36500  # 100 лет
+
+# Параметры сертификатов (Distinguished Name)
+# Получено: ssh master1 "openssl x509 -in /etc/kubernetes/ssl/ca.crt -noout -subject"
+# Пример вывода: subject=CN = kubernetes
+# Настраивается по желанию, можно оставить стандартные значения
+COUNTRY="BY"
+STATE="Minsk"
+LOCALITY="Minsk"
+ORGANIZATION="Kubernetes"
+ORGANIZATIONAL_UNIT="cluster.local"
+
+# Размер ключей RSA (2048 или 4096)
+# Получено: ssh master1 "openssl x509 -in /etc/kubernetes/ssl/ca.crt -noout -text | grep 'Public-Key'"
+# Пример: Public-Key: (2048 bit)
+KEY_SIZE=2048
+
+# Пути к существующим сертификатам (для создания резервной копии)
+# Получено: ssh master1 "ls -la /etc/kubernetes/pki" или "readlink -f /etc/kubernetes/pki"
+# В этом кластере: /etc/kubernetes/pki -> /etc/kubernetes/ssl
+K8S_PKI_DIR="/etc/kubernetes/ssl"
+
+# Получено: ssh master1 "find /etc -name 'ca.pem' -path '*/etcd/*' -exec dirname {} \;"
+# Или проверить /etc/etcd.env переменную ETCD_TRUSTED_CA_FILE
+ETCD_PKI_DIR="/etc/ssl/etcd/ssl"
+
+# SSH настройки для автоматического распространения сертификатов
+# Получено: whoami на текущей системе или пользователь с правами root
+SSH_USER="root"
+
+# Получено: ls ~/.ssh/ для проверки доступных ключей
+# В данном случае используется id_ed25519 вместо стандартного id_rsa
+SSH_KEY_PATH="~/.ssh/id_ed25519"
+
+# Kubernetes config
+# Получено: стандартный путь для admin.conf
+# Проверить: ssh master1 "ls -la /etc/kubernetes/admin.conf"
+KUBECONFIG="/etc/kubernetes/admin.conf"
+
+# Опции распространения сертификатов
+# Настраивается по предпочтениям
+DISTRIBUTE_TO_MASTERS="true"   # Автоматически распространять на остальные мастеры
+DISTRIBUTE_TO_WORKERS="true"   # Автоматически распространять на воркеры
+PARALLEL_DISTRIBUTION="false"  # Распространять последовательно (безопаснее)
+
+# Особенности кластера
+# Получено: анализ конфигурации
+# - Установлен через kubespray/kubeadm (проверено наличием /etc/kubernetes/kubeadm-config.yaml)
+# - Используется kube-vip для HA (kubectl get pods -n kube-system | grep kube-vip или ls /etc/kubernetes/manifests/kube-vip.yml)
+# - CNI: Calico (kubectl get pods -n kube-system | grep calico)
+# - Load Balancer: MetalLB (kubectl get pods -n kube-system | grep metallb или ls /etc/kubernetes/metallb.yaml)
+# - etcd работает как systemd service (systemctl status etcd), не как static pod
+# - etcd сертификаты в отдельной директории /etc/ssl/etcd/ssl/ (найдено через grep ETCD_TRUSTED_CA_FILE /etc/etcd.env)
