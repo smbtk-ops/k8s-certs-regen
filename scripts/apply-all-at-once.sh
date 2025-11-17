@@ -192,7 +192,7 @@ for node in $MASTER_NODES; do
             echo \"ОШИБКА: API server cert/key не соответствуют!\"
             exit 1
         fi
-        echo \"✓ API server: cert и key соответствуют\"
+        echo \" API server: cert и key соответствуют\"
 
         # Проверка соответствия приватного ключа и сертификата etcd client
         ETCD_CERT_MOD=\$(openssl x509 -noout -modulus -in /etc/ssl/etcd/ssl/node-$hostname.pem 2>/dev/null | openssl md5)
@@ -201,20 +201,20 @@ for node in $MASTER_NODES; do
             echo \"ОШИБКА: etcd client cert/key не соответствуют!\"
             exit 1
         fi
-        echo \"✓ etcd client: cert и key соответствуют\"
+        echo \" etcd client: cert и key соответствуют\"
 
         # Проверка что сертификаты подписаны правильным CA
         if ! openssl verify -CAfile /etc/kubernetes/ssl/ca.crt /etc/kubernetes/ssl/apiserver.crt >/dev/null 2>&1; then
             echo \"ОШИБКА: API server cert не подписан правильным CA!\"
             exit 1
         fi
-        echo \"✓ API server: подписан правильным CA\"
+        echo \" API server: подписан правильным CA\"
 
         if ! openssl verify -CAfile /etc/ssl/etcd/ssl/ca.pem /etc/ssl/etcd/ssl/node-$hostname.pem >/dev/null 2>&1; then
             echo \"ОШИБКА: etcd client cert не подписан правильным CA!\"
             exit 1
         fi
-        echo \"✓ etcd client: подписан правильным CA\"
+        echo \" etcd client: подписан правильным CA\"
 
         echo \"Все проверки сертификатов пройдены на $hostname\"
         echo \"Сертификаты применены на $hostname\"
