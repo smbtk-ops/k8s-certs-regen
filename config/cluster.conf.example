@@ -90,6 +90,30 @@ ETCD_NODES="master1:192.168.88.191 master3:192.168.88.193 master2:192.168.88.192
 # Или из ETCD_INITIAL_CLUSTER
 ETCD_NAMES="etcd1 etcd2 etcd3"
 
+# Тип развертывания etcd
+# auto        - автоматическое определение (рекомендуется)
+# systemd     - etcd как systemd service (Kubespray)
+# static-pod  - etcd как static pod (kubeadm по умолчанию)
+#
+# Как определить тип на вашем кластере:
+# 1. Проверить systemd:
+#    ssh master1 "systemctl status etcd"
+#    Если работает → type=systemd
+#
+# 2. Проверить static pod:
+#    ssh master1 "ls /etc/kubernetes/manifests/etcd.yaml"
+#    Если файл есть → type=static-pod
+#
+# 3. Проверить путь к сертификатам:
+#    ssh master1 "find /etc -name 'ca.pem' -path '*/etcd/*' 2>/dev/null"
+#    /etc/ssl/etcd/ssl/ca.pem → systemd
+#    /etc/kubernetes/pki/etcd/ca.crt → static-pod
+ETCD_TYPE="auto"
+
+# Путь к манифесту etcd (только для static-pod)
+# Используется если ETCD_TYPE="static-pod"
+ETCD_MANIFEST_PATH="/etc/kubernetes/manifests/etcd.yaml"
+
 # Срок действия сертификатов (в днях)
 # Настраивается по необходимости, стандарт - 1 год (365), рекомендуется 10 лет для упрощения
 CERT_VALIDITY_DAYS=36500  # 100 лет

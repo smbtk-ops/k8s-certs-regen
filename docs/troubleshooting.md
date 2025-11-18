@@ -6,6 +6,8 @@
 
 После работы скрипта `apply-all-at-once.sh` каждая master нода использует **hostname-specific** сертификаты etcd.
 
+### Для etcd systemd (Kubespray)
+
 **Структура на master1:**
 ```
 /etc/ssl/etcd/ssl/
@@ -19,25 +21,32 @@
 └── admin-master1-key.pem
 ```
 
-**Структура на master2:**
-```
-/etc/ssl/etcd/ssl/
-├── ca.pem                       # общий CA (тот же что на master1)
-├── ca-key.pem
-├── member-master2.pem           # уникальный для master2
-├── member-master2-key.pem
-├── node-master2.pem             # уникальный для master2
-├── node-master2-key.pem
-├── admin-master2.pem            # уникальный для master2
-└── admin-master2-key.pem
-```
-
-**Аналогично для master3** (master3.pem файлы).
-
 **Манифест API Server** на каждой ноде обновляется автоматически:
 - master1: `--etcd-certfile=/etc/ssl/etcd/ssl/node-master1.pem`
 - master2: `--etcd-certfile=/etc/ssl/etcd/ssl/node-master2.pem`
 - master3: `--etcd-certfile=/etc/ssl/etcd/ssl/node-master3.pem`
+
+### Для etcd static-pod (kubeadm)
+
+**Структура на master1:**
+```
+/etc/kubernetes/pki/etcd/
+├── ca.crt                       # общий CA для всех нод
+├── ca.key                       # общий CA key для всех нод
+├── member-master1.crt           # etcd server cert для master1
+├── member-master1.key
+├── node-master1.crt             # etcd client cert для API server на master1
+├── node-master1.key
+├── admin-master1.crt            # etcd admin cert для etcdctl на master1
+└── admin-master1.key
+```
+
+**Манифест API Server** на каждой ноде обновляется автоматически:
+- master1: `--etcd-certfile=/etc/kubernetes/pki/etcd/node-master1.crt`
+- master2: `--etcd-certfile=/etc/kubernetes/pki/etcd/node-master2.crt`
+- master3: `--etcd-certfile=/etc/kubernetes/pki/etcd/node-master3.crt`
+
+**Структура на master2/master3:** Аналогично с заменой master1 на master2/master3 в именах файлов.
 
 **Ключевой момент:** Каждая нода имеет ТОЛЬКО свои сертификаты, а не сертификаты всех нод.
 
@@ -109,6 +118,58 @@ LB_VIP=""
 # Очистить неиспользуемую переменную для чистоты конфига
 LB_VIP=""
 LB_DNS=""
+```
+
+### Ошибка: "ETCD_TYPE должен быть 'auto', 'systemd' или 'static-pod'"
+
+**Полное сообщение:**
+```
+[ERROR] ETCD_TYPE должен быть 'auto', 'systemd' или 'static-pod', получено: 'docker'
+```
+
+**Причина:** Неправильное значение в ETCD_TYPE
+
+**Решение:**
+```bash
+# В config/cluster.conf используйте только:
+ETCD_TYPE="auto"        # Автоматическое определение (рекомендуется)
+# ИЛИ
+ETCD_TYPE="systemd"     # Явно указать systemd (Kubespray)
+# ИЛИ
+ETCD_TYPE="static-pod"  # Явно указать static pod (kubeadm)
+```
+
+**Как определить тип вручную:**
+```bash
+# Проверить systemd
+ssh root@master1 "systemctl status etcd"
+# Если работает → ETCD_TYPE="systemd"
+
+# Проверить static pod
+ssh root@master1 "ls /etc/kubernetes/manifests/etcd.yaml"
+# Если файл есть → ETCD_TYPE="static-pod"
+```
+
+### Ошибка: "Не удалось определить тип etcd"
+
+**Полное сообщение:**
+```
+[INFO] ETCD_TYPE=auto, определяем тип автоматически...
+[ERROR] Не удалось определить тип etcd на 192.168.88.191
+[ERROR] Проверьте что etcd запущен на этой ноде
+```
+
+**Причина:** etcd не запущен или используется нестандартный способ развертывания
+
+**Решение:**
+```bash
+# 1. Проверить что etcd работает
+ssh root@192.168.88.191 "systemctl status etcd"  # для systemd
+ssh root@192.168.88.191 "crictl ps | grep etcd"  # для static-pod
+
+# 2. Если etcd работает, но не определяется автоматически:
+# Явно укажите тип в config/cluster.conf
+ETCD_TYPE="systemd"  # или "static-pod"
 ```
 
 ### Проблема: kubectl подключается, но VIP не работает
@@ -537,6 +598,7 @@ ssh root@master1 "systemctl status etcd"
 ssh root@master1 "journalctl -u etcd -n 100"
 
 # Попробовать health check с localhost (с master1)
+# Для systemd etcd:
 ssh root@master1 "
   ETCDCTL_API=3 etcdctl \
     --endpoints=https://127.0.0.1:2379 \
@@ -546,9 +608,19 @@ ssh root@master1 "
     endpoint health
 "
 
+# Для static-pod etcd:
+ssh root@master1 "
+  ETCDCTL_API=3 etcdctl \
+    --endpoints=https://127.0.0.1:2379 \
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+    --cert=/etc/kubernetes/pki/etcd/admin-master1.crt \
+    --key=/etc/kubernetes/pki/etcd/admin-master1.key \
+    endpoint health
+"
+
 # Для проверки с других мастеров используйте соответствующий сертификат:
-# master2: --cert=/etc/ssl/etcd/ssl/admin-master2.pem --key=/etc/ssl/etcd/ssl/admin-master2-key.pem
-# master3: --cert=/etc/ssl/etcd/ssl/admin-master3.pem --key=/etc/ssl/etcd/ssl/admin-master3-key.pem
+# systemd:    --cert=/etc/ssl/etcd/ssl/admin-master2.pem --key=/etc/ssl/etcd/ssl/admin-master2-key.pem
+# static-pod: --cert=/etc/kubernetes/pki/etcd/admin-master2.crt --key=/etc/kubernetes/pki/etcd/admin-master2.key
 ```
 
 **Решение:**
@@ -639,12 +711,23 @@ kubectl get nodes
 kubectl get pods -A | grep -v Running
 
 # 3. Проверка etcd (запускать с master1)
+# Для systemd etcd (путь: /etc/ssl/etcd/ssl/)
 ssh root@192.168.88.191 "
   ETCDCTL_API=3 etcdctl \
     --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
     --cacert=/etc/ssl/etcd/ssl/ca.pem \
     --cert=/etc/ssl/etcd/ssl/admin-master1.pem \
     --key=/etc/ssl/etcd/ssl/admin-master1-key.pem \
+    endpoint health
+"
+
+# Для static-pod etcd (путь: /etc/kubernetes/pki/etcd/)
+ssh root@192.168.88.191 "
+  ETCDCTL_API=3 etcdctl \
+    --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+    --cert=/etc/kubernetes/pki/etcd/admin-master1.crt \
+    --key=/etc/kubernetes/pki/etcd/admin-master1.key \
     endpoint health
 "
 
@@ -670,15 +753,32 @@ ssh root@192.168.88.191 "openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noo
 
 ## Полезные команды для диагностики
 
-**ВАЖНО:** Каждая master нода использует hostname-specific сертификаты etcd:
+**ВАЖНО:** Каждая master нода использует hostname-specific сертификаты etcd.
+
+**Для systemd etcd (Kubespray):**
 - master1: `node-master1.pem`, `member-master1.pem`, `admin-master1.pem`
 - master2: `node-master2.pem`, `member-master2.pem`, `admin-master2.pem`
 - master3: `node-master3.pem`, `member-master3.pem`, `admin-master3.pem`
 
+**Для static-pod etcd (kubeadm):**
+- master1: `node-master1.crt`, `member-master1.crt`, `admin-master1.crt`
+- master2: `node-master2.crt`, `member-master2.crt`, `admin-master2.crt`
+- master3: `node-master3.crt`, `member-master3.crt`, `admin-master3.crt`
+
 ```bash
-# Проверка всех сертификатов на ноде
+# Проверка всех сертификатов на ноде (для systemd)
 ssh root@<node> "
   for cert in /etc/kubernetes/ssl/*.crt /etc/ssl/etcd/ssl/*.pem; do
+    if [[ -f \$cert ]]; then
+      echo \"=== \$cert ===\"
+      openssl x509 -in \$cert -noout -subject -issuer -dates 2>/dev/null || echo 'Not a valid cert'
+    fi
+  done
+"
+
+# Проверка всех сертификатов на ноде (для static-pod)
+ssh root@<node> "
+  for cert in /etc/kubernetes/ssl/*.crt /etc/kubernetes/pki/etcd/*.crt; do
     if [[ -f \$cert ]]; then
       echo \"=== \$cert ===\"
       openssl x509 -in \$cert -noout -subject -issuer -dates 2>/dev/null || echo 'Not a valid cert'
@@ -708,10 +808,24 @@ ssh root@<node> "kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes"
 # На каждой master ноде
 ssh root@<node> "
   journalctl -u kubelet -n 100 > /tmp/kubelet.log
-  journalctl -u etcd -n 100 > /tmp/etcd.log
+  journalctl -u etcd -n 100 > /tmp/etcd.log 2>/dev/null || echo 'etcd systemd не найден' > /tmp/etcd.log
   crictl ps -a > /tmp/pods.log
   ls -laR /etc/kubernetes/ssl/ > /tmp/k8s-certs.log
-  ls -laR /etc/ssl/etcd/ssl/ > /tmp/etcd-certs.log
+
+  # Для systemd etcd
+  ls -laR /etc/ssl/etcd/ssl/ > /tmp/etcd-certs-systemd.log 2>/dev/null || echo 'systemd etcd не найден' > /tmp/etcd-certs-systemd.log
+
+  # Для static-pod etcd
+  ls -laR /etc/kubernetes/pki/etcd/ > /tmp/etcd-certs-static.log 2>/dev/null || echo 'static-pod etcd не найден' > /tmp/etcd-certs-static.log
+
+  # Проверить какой тип etcd используется
+  if systemctl is-active etcd >/dev/null 2>&1; then
+    echo 'systemd' > /tmp/etcd-type.log
+  elif [ -f /etc/kubernetes/manifests/etcd.yaml ]; then
+    echo 'static-pod' > /tmp/etcd-type.log
+  else
+    echo 'unknown' > /tmp/etcd-type.log
+  fi
 "
 
 # Скачать логи
@@ -728,8 +842,8 @@ scp root@<node>:/tmp/*.log ./logs/
 1. **ВСЕГДА делайте backup перед применением**
 2. **Проверьте конфигурацию перед генерацией**:
    ```bash
-   # Убедитесь что USE_VIP установлен правильно
-   grep -E 'USE_VIP|LB_VIP|MASTER_IP' config/cluster.conf
+   # Убедитесь что USE_VIP и ETCD_TYPE установлены правильно
+   grep -E 'USE_VIP|LB_VIP|MASTER_IP|ETCD_TYPE' config/cluster.conf
 
    # Для кластера с VIP (kube-vip, haproxy):
    USE_VIP="true"
@@ -738,6 +852,9 @@ scp root@<node>:/tmp/*.log ./logs/
    # Для кластера без VIP (single master или прямой доступ):
    USE_VIP="false"
    LB_VIP=""
+
+   # Для определения типа etcd (рекомендуется):
+   ETCD_TYPE="auto"
    ```
 3. **Тестируйте в staging окружении**
 4. **Используйте `apply-all-at-once.sh` для multi-master**

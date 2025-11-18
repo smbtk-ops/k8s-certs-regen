@@ -18,6 +18,9 @@ fi
 
 source "$CONFIG_FILE"
 
+# Определение типа etcd (auto-detect или используем заданный)
+determine_etcd_type
+
 log_warning "==================================="
 log_warning "КРИТИЧЕСКИЕ ПРЕДУПРЕЖДЕНИЯ"
 log_warning "==================================="
@@ -121,8 +124,7 @@ wait
 log_info "Остановка etcd на всех master нодах..."
 for node in $MASTER_NODES; do
     IFS=':' read -r hostname ip <<< "$node"
-    log_info "Остановка etcd на $hostname..."
-    ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "systemctl stop etcd" &
+    stop_etcd "$ip" "$hostname" "$ETCD_TYPE" &
 done
 wait
 
@@ -233,8 +235,7 @@ log_info "Запуск etcd на всех master нодах одновремен
 
 for node in $MASTER_NODES; do
     IFS=':' read -r hostname ip <<< "$node"
-    log_info "Запуск etcd на $hostname..."
-    ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "systemctl start etcd" &
+    start_etcd "$ip" "$hostname" "$ETCD_TYPE" &
 done
 wait
 

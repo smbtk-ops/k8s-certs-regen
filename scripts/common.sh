@@ -55,6 +55,7 @@ check_required_vars() {
         "LOCALITY"
         "ORGANIZATION"
         "USE_VIP"
+        "ETCD_TYPE"
     )
 
     local missing=0
@@ -68,6 +69,24 @@ check_required_vars() {
     if [[ $missing -eq 1 ]]; then
         exit 1
     fi
+
+    # Проверка допустимости значения ETCD_TYPE
+    case "${ETCD_TYPE,,}" in
+        auto|systemd|static-pod)
+            # Нормализация значения
+            if [[ "${ETCD_TYPE,,}" == "auto" ]]; then
+                ETCD_TYPE="auto"
+            elif [[ "${ETCD_TYPE,,}" == "systemd" ]]; then
+                ETCD_TYPE="systemd"
+            elif [[ "${ETCD_TYPE,,}" == "static-pod" ]]; then
+                ETCD_TYPE="static-pod"
+            fi
+            ;;
+        *)
+            log_error "ETCD_TYPE должен быть 'auto', 'systemd' или 'static-pod', получено: '$ETCD_TYPE'"
+            exit 1
+            ;;
+    esac
 }
 
 # Валидация конфигурации VIP
@@ -237,4 +256,148 @@ backup_file() {
         cp "$file" "$backup_file"
         log_info "Создана резервная копия: $backup_file"
     fi
+}
+
+# Определение типа etcd на удаленной ноде
+detect_etcd_type() {
+    local node_ip="$1"
+    local detected_type="unknown"
+
+    log_info "Определение типа etcd на $node_ip..."
+
+    # Проверка systemd
+    if ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "systemctl is-active etcd >/dev/null 2>&1"; then
+        detected_type="systemd"
+        log_info "Обнаружен etcd как systemd service"
+    # Проверка static pod
+    elif ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "[ -f /etc/kubernetes/manifests/etcd.yaml ]"; then
+        detected_type="static-pod"
+        log_info "Обнаружен etcd как static pod"
+    else
+        log_error "Не удалось определить тип etcd на $node_ip"
+        log_error "Проверьте что etcd запущен на этой ноде"
+        exit 1
+    fi
+
+    echo "$detected_type"
+}
+
+# Получение пути к сертификатам etcd в зависимости от типа
+get_etcd_pki_path() {
+    local etcd_type="$1"
+
+    case "$etcd_type" in
+        systemd)
+            echo "/etc/ssl/etcd/ssl"
+            ;;
+        static-pod)
+            echo "/etc/kubernetes/pki/etcd"
+            ;;
+        *)
+            log_error "Неизвестный тип etcd: $etcd_type"
+            exit 1
+            ;;
+    esac
+}
+
+# Остановка etcd на удаленной ноде
+stop_etcd() {
+    local node_ip="$1"
+    local node_hostname="$2"
+    local etcd_type="$3"
+
+    log_info "Остановка etcd на $node_hostname ($node_ip) [тип: $etcd_type]..."
+
+    case "$etcd_type" in
+        systemd)
+            ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "systemctl stop etcd" || {
+                log_error "Не удалось остановить etcd через systemd на $node_hostname"
+                return 1
+            }
+            ;;
+        static-pod)
+            ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "
+                if [ -f '${ETCD_MANIFEST_PATH}' ]; then
+                    mv '${ETCD_MANIFEST_PATH}' '/tmp/etcd.yaml.backup'
+                    echo 'Static pod манифест перемещен в /tmp/etcd.yaml.backup'
+                else
+                    echo 'Манифест etcd не найден, возможно уже остановлен'
+                fi
+            " || {
+                log_error "Не удалось остановить etcd static pod на $node_hostname"
+                return 1
+            }
+            # Ждем пока pod остановится
+            sleep 5
+            ;;
+        *)
+            log_error "Неизвестный тип etcd: $etcd_type"
+            return 1
+            ;;
+    esac
+
+    log_success "etcd остановлен на $node_hostname"
+}
+
+# Запуск etcd на удаленной ноде
+start_etcd() {
+    local node_ip="$1"
+    local node_hostname="$2"
+    local etcd_type="$3"
+
+    log_info "Запуск etcd на $node_hostname ($node_ip) [тип: $etcd_type]..."
+
+    case "$etcd_type" in
+        systemd)
+            ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "systemctl start etcd" || {
+                log_error "Не удалось запустить etcd через systemd на $node_hostname"
+                return 1
+            }
+            ;;
+        static-pod)
+            ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "
+                if [ -f '/tmp/etcd.yaml.backup' ]; then
+                    mv '/tmp/etcd.yaml.backup' '${ETCD_MANIFEST_PATH}'
+                    echo 'Static pod манифест восстановлен'
+                else
+                    echo 'ОШИБКА: backup манифеста не найден в /tmp/etcd.yaml.backup'
+                    exit 1
+                fi
+            " || {
+                log_error "Не удалось запустить etcd static pod на $node_hostname"
+                return 1
+            }
+            # Ждем пока pod запустится
+            sleep 10
+            ;;
+        *)
+            log_error "Неизвестный тип etcd: $etcd_type"
+            return 1
+            ;;
+    esac
+
+    log_success "etcd запущен на $node_hostname"
+}
+
+# Определение и установка типа etcd для кластера
+# Вызывать в начале скриптов после загрузки конфига
+determine_etcd_type() {
+    if [[ "$ETCD_TYPE" == "auto" ]]; then
+        log_info "ETCD_TYPE=auto, определяем тип автоматически..."
+
+        # Берем первую master ноду для определения
+        local first_node=$(echo "$MASTER_NODES" | awk '{print $1}')
+        IFS=':' read -r hostname ip <<< "$first_node"
+
+        # Определяем тип на первой ноде
+        ETCD_TYPE=$(detect_etcd_type "$ip")
+
+        log_info "Определен тип etcd: $ETCD_TYPE"
+        log_info "Все master ноды должны использовать тот же тип"
+    else
+        log_info "Используется заданный тип etcd: $ETCD_TYPE"
+    fi
+
+    # Экспортируем для использования в других частях скрипта
+    export ETCD_TYPE
 }

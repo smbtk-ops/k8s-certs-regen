@@ -6,8 +6,8 @@
 
 - Multi-master HA кластеры (3+ master nodes)
 - Kubespray/kubeadm установки
-- etcd как systemd service
-- kube-vip для HA
+- etcd как systemd service или static pod (автоопределение)
+- kube-vip для HA или без VIP
 
 ## Быстрый старт
 
@@ -43,7 +43,13 @@ USE_VIP="true"
 
 # Виртуальный IP (используется если USE_VIP="true")
 LB_VIP="192.168.88.190"
-LB_DNS="cluster.local"
+LB_DNS=""  # Оставьте пустым если нет DNS записи для VIP
+
+# Тип развертывания etcd (автоопределение или явное указание)
+# auto        - автоматическое определение (рекомендуется)
+# systemd     - etcd как systemd service (Kubespray)
+# static-pod  - etcd как static pod (kubeadm)
+ETCD_TYPE="auto"
 
 # ВАЖНО: Проверить реальный ClusterIP kubernetes service
 # kubectl get svc kubernetes -o yaml | grep clusterIP
@@ -88,6 +94,30 @@ LB_VIP="api.cluster.local"  # DNS имя вместо IP
 LB_DNS="api.cluster.local"
 ```
 Скрипт добавит DNS имя в SAN сертификата.
+
+**Определение типа etcd в вашем кластере:**
+
+Скрипт может автоматически определить тип etcd (рекомендуется использовать `ETCD_TYPE="auto"`), но вы также можете проверить тип вручную:
+
+**1. Проверить systemd:**
+```bash
+ssh root@master1 "systemctl status etcd"
+```
+Если etcd работает как systemd service → `ETCD_TYPE="systemd"`
+Путь к сертификатам: `/etc/ssl/etcd/ssl/`
+
+**2. Проверить static pod:**
+```bash
+ssh root@master1 "ls /etc/kubernetes/manifests/etcd.yaml"
+```
+Если файл существует → `ETCD_TYPE="static-pod"`
+Путь к сертификатам: `/etc/kubernetes/pki/etcd/`
+
+**3. Использовать авто-определение (рекомендуется):**
+```bash
+ETCD_TYPE="auto"
+```
+Скрипт автоматически определит тип на первой master ноде.
 
 ### 2. Генерация сертификатов
 
@@ -146,12 +176,23 @@ kubectl get nodes
 kubectl get pods -A
 
 # Проверка etcd health (запускать с master1)
+# Для systemd etcd (путь: /etc/ssl/etcd/ssl/)
 ssh root@192.168.88.191 "
   ETCDCTL_API=3 etcdctl \
     --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
     --cacert=/etc/ssl/etcd/ssl/ca.pem \
     --cert=/etc/ssl/etcd/ssl/admin-master1.pem \
     --key=/etc/ssl/etcd/ssl/admin-master1-key.pem \
+    endpoint health
+"
+
+# Для static-pod etcd (путь: /etc/kubernetes/pki/etcd/)
+ssh root@192.168.88.191 "
+  ETCDCTL_API=3 etcdctl \
+    --endpoints=https://192.168.88.191:2379,https://192.168.88.192:2379,https://192.168.88.193:2379 \
+    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+    --cert=/etc/kubernetes/pki/etcd/admin-master1.crt \
+    --key=/etc/kubernetes/pki/etcd/admin-master1.key \
     endpoint health
 "
 
@@ -392,3 +433,9 @@ systemctl start kubelet
    - Установите `USE_VIP="false"` для single-master или без VIP
    - Если `USE_VIP="true"`, то `LB_VIP` автоматически добавляется в SAN сертификата
    - Admin kubeconfig использует VIP или MASTER_IP в зависимости от `USE_VIP`
+
+8. **Тип развертывания etcd**
+   - Используйте `ETCD_TYPE="auto"` для автоматического определения (рекомендуется)
+   - systemd: etcd работает как systemd service (Kubespray), сертификаты в `/etc/ssl/etcd/ssl/`
+   - static-pod: etcd работает как static pod (kubeadm), сертификаты в `/etc/kubernetes/pki/etcd/`
+   - Скрипт автоматически использует правильные пути и команды для каждого типа
