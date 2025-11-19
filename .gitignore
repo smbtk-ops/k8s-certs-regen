@@ -26,3 +26,4 @@ scripts/*.conf
 
 # Персональная конфигурация
 config/cluster.conf
+.DS_Store
