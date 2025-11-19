@@ -1,253 +1,227 @@
 # Ручная регенерация сертификатов Kubernetes через kubeadm
 
-Пошаговое руководство по ручному перевыпуску сертификатов Kubernetes кластера с использованием встроенного инструмента kubeadm. Описаны действия руками на каждой ноде.
+Полное руководство по регенерации сертификатов Kubernetes кластера с использованием встроенного инструмента kubeadm.
 
 ## Содержание
 
 1. [Введение](#введение)
 2. [Подготовка](#подготовка)
-3. [Создание резервных копий](#создание-резервных-копий)
-4. [Регенерация сертификатов](#регенерация-сертификатов)
+3. [Полная замена сертификатов](#полная-замена-сертификатов)
+4. [Модульное обновление](#модульное-обновление)
 5. [Проверка и тестирование](#проверка-и-тестирование)
 6. [Troubleshooting](#troubleshooting)
 7. [Ограничения](#ограничения)
 
 ## Введение
 
-Это руководство описывает **ручной** процесс перевыпуска сертификатов Kubernetes через kubeadm. Вы будете заходить на каждую ноду и выполнять команды последовательно.
-
 ### Когда использовать kubeadm метод
 
 kubeadm подходит если:
 - Кластер был установлен через kubeadm
 - Нужна быстрая регенерация стандартных сертификатов
-- Истек срок действия сертификатов
+- Истек срок действия сертификатов и требуется быстрое продление
+- Не требуются кастомные параметры (SAN, validity period, etc.)
 - etcd работает как static pod (kubeadm по умолчанию)
+- Single-master или простой multi-master кластер
 
-### ВАЖНЫЕ ОГРАНИЧЕНИЯ
+### Преимущества kubeadm
 
-1. **Требует kubeadm** - не работает для кластеров установленных через Kubespray, Ansible или вручную
-2. **Не поддерживает etcd systemd** - работает только с static-pod etcd
-3. **Ограниченная кастомизация SAN** - сложно добавить нестандартные IP/DNS
-4. **Не меняет CA** - нельзя заменить корневой CA
-5. **Фиксированный срок действия** - обычно 1 год
+- Быстро и просто
+- Встроен в Kubernetes
+- Автоматически определяет параметры
+- Минимум ручной работы
+- Официально поддерживается
 
-### Информация о кластере
+### Недостатки и ограничения
 
-**Используемая конфигурация:**
-- Master ноды: master1 (192.168.88.191), master2 (192.168.88.192), master3 (192.168.88.193)
-- Worker ноды: worker1 (192.168.88.194), worker2 (192.168.88.195)
-- HA VIP: 192.168.88.190
+**ВАЖНЫЕ ОГРАНИЧЕНИЯ:**
+
+1. **Требует kubeadm** - не работает для кластеров установленных другими способами (Kubespray, Ansible, вручную)
+2. **Ограниченная поддержка multi-master** - могут быть проблемы с etcd сертификатами
+3. **Не поддерживает etcd systemd** - работает только с static-pod etcd
+4. **Ограниченная кастомизация SAN** - сложно добавить нестандартные IP/DNS
+5. **Не меняет CA** - нельзя заменить корневой CA
+6. **Фиксированный срок действия** - обычно 1 год, сложно изменить
+7. **Hostname-specific etcd сертификаты** - kubeadm может генерировать их некорректно для некоторых setups
 
 ### Требования
 
-**Необходимо:**
-- Кластер установлен через kubeadm
+**Инструменты:**
+- kubeadm (уже установлен если кластер создан через kubeadm)
+- kubectl
 - SSH доступ ко всем master нодам
-- Root права на всех нодах
-- kubeadm уже установлен
+- Root права
 
-**Время выполнения:**
+**Проверка:**
+```bash
+kubeadm version
+# Ожидаемый вывод: kubeadm version: &version.Info{...}
+
+kubectl version --short
+```
+
+**Время:**
 - Подготовка: 5-10 минут
 - Регенерация на одной ноде: 2-5 минут
-- Полное обновление кластера: 15-30 минут
-- Downtime: минимальный (последовательное обновление)
+- Применение на multi-master: 15-30 минут
+- Downtime: минимальный (поочередное обновление) или 5-10 минут (одновременное)
 
 ## Подготовка
 
-### Шаг 1: Проверка что кластер установлен через kubeadm
-
-Зайдите на первую master ноду:
+### Шаг 1: Проверка существующих сертификатов
 
 ```bash
-ssh root@192.168.88.191
+# На master ноде
+sudo kubeadm certs check-expiration
+
+# Пример вывода:
+# CERTIFICATE                EXPIRES                  RESIDUAL TIME   CERTIFICATE AUTHORITY   EXTERNALLY MANAGED
+# admin.conf                 Jan 18, 2026 12:00 UTC   364d            ca                      no
+# apiserver                  Jan 18, 2026 12:00 UTC   364d            ca                      no
+# apiserver-etcd-client      Jan 18, 2026 12:00 UTC   364d            etcd-ca                 no
+# apiserver-kubelet-client   Jan 18, 2026 12:00 UTC   364d            ca                      no
+# controller-manager.conf    Jan 18, 2026 12:00 UTC   364d            ca                      no
+# etcd-healthcheck-client    Jan 18, 2026 12:00 UTC   364d            etcd-ca                 no
+# etcd-peer                  Jan 18, 2026 12:00 UTC   364d            etcd-ca                 no
+# etcd-server                Jan 18, 2026 12:00 UTC   364d            etcd-ca                 no
+# front-proxy-client         Jan 18, 2026 12:00 UTC   364d            front-proxy-ca          no
+# scheduler.conf             Jan 18, 2026 12:00 UTC   364d            ca                      no
+#
+# CERTIFICATE AUTHORITY   EXPIRES                  RESIDUAL TIME   EXTERNALLY MANAGED
+# ca                      Jan 16, 2035 11:00 UTC   9y              no
+# etcd-ca                 Jan 16, 2035 11:00 UTC   9y              no
+# front-proxy-ca          Jan 16, 2035 11:00 UTC   9y              no
 ```
 
-Проверьте наличие конфига kubeadm:
+**Объяснение вывода:**
+- `CERTIFICATE` - тип сертификата
+- `EXPIRES` - срок истечения
+- `RESIDUAL TIME` - оставшееся время
+- `CERTIFICATE AUTHORITY` - какой CA подписал
+- `EXTERNALLY MANAGED` - управляется ли вне kubeadm
+
+### Шаг 2: Backup
+
+**КРИТИЧЕСКИ ВАЖНО:**
 
 ```bash
-ls -lh /etc/kubernetes/kubeadm-config.yaml
+# На каждой master ноде
+for node in master1:192.168.88.191 master2:192.168.88.192 master3:192.168.88.193; do
+  IFS=':' read -r hostname ip <<< "$node"
+  echo "=== Backup на $hostname ($ip) ==="
+
+  ssh root@$ip "
+    BACKUP_DIR=\"/root/k8s-certs-backup-\$(date +%Y%m%d)\"
+    mkdir -p \$BACKUP_DIR
+
+    # Backup всех сертификатов
+    cp -r /etc/kubernetes/pki \$BACKUP_DIR/pki
+
+    # Backup kubeconfig
+    cp /etc/kubernetes/*.conf \$BACKUP_DIR/
+
+    # Backup static pod manifests
+    cp -r /etc/kubernetes/manifests \$BACKUP_DIR/manifests
+
+    # Backup kubelet config
+    cp -r /var/lib/kubelet/pki \$BACKUP_DIR/kubelet-pki 2>/dev/null || true
+
+    echo \$BACKUP_DIR > /tmp/last-backup-dir
+    echo \"Backup: \$BACKUP_DIR\"
+  "
+done
 ```
 
-Если файл существует - кластер установлен через kubeadm и можно продолжать.
-
-Проверьте что etcd работает как static pod:
+### Шаг 3: Определение типа кластера
 
 ```bash
-ls -lh /etc/kubernetes/manifests/etcd.yaml
+# Проверить как был установлен кластер
+"ls /etc/kubernetes/kubeadm-config.yaml"
+
+# Если файл есть - кластер установлен через kubeadm
+# Если нет - kubeadm метод НЕ ПОДХОДИТ!
+
+# Проверить etcd тип
+"ls /etc/kubernetes/manifests/etcd.yaml"
+
+# Если файл есть - etcd как static pod (поддерживается)
+# Если нет - скорее всего etcd systemd (НЕ ПОДДЕРЖИВАЕТСЯ kubeadm)
 ```
 
-Если файл существует - etcd static pod, kubeadm поддерживается.
+**ВАЖНО:** Если кластер установлен не через kubeadm или etcd работает как systemd - используйте [OpenSSL](openssl.md) или [CFSSL](cfssl.md) методы!
 
-Если файла нет:
+### Шаг 4: Проверка конфигурации API Server
 
 ```bash
-systemctl status etcd
+# Получить текущие SAN
+"openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text | grep -A1 'Subject Alternative Name'"
+
+# Пример вывода:
+# X509v3 Subject Alternative Name:
+#     DNS:kubernetes, DNS:kubernetes.default, DNS:kubernetes.default.svc, DNS:kubernetes.default.svc.cluster.local, DNS:master1, IP Address:192.168.88.191, IP Address:10.233.0.1
 ```
 
-Если etcd работает как systemd service - kubeadm НЕ ПОДХОДИТ! Используйте OpenSSL или CFSSL методы.
+Запишите текущие SAN - kubeadm попытается сохранить их, но может не добавить новые.
 
-### Шаг 2: Проверка текущих сертификатов
+## Полная замена сертификатов
 
-На ноде master1:
+### Метод 1: Регенерация всех сертификатов (рекомендуется)
+
+**На каждой master ноде ПОСЛЕДОВАТЕЛЬНО:**
 
 ```bash
-kubeadm certs check-expiration
+# ВАЖНО: Выполнять на каждой master ноде по очереди!
+
+# Определить master ноду
+MASTER_IP="192.168.88.191"  # Замените на текущую ноду
+
+ssh root@$MASTER_IP "
+  echo '========================================='
+  echo 'Регенерация сертификатов на \$(hostname)'
+  echo '========================================='
+
+  # 1. Регенерировать все сертификаты
+  kubeadm certs renew all
+
+  # 2. Перезапустить static pods
+  # Переместить манифесты и вернуть обратно для перезапуска
+  mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/
+  mv /etc/kubernetes/manifests/kube-controller-manager.yaml /tmp/
+  mv /etc/kubernetes/manifests/kube-scheduler.yaml /tmp/
+  mv /etc/kubernetes/manifests/etcd.yaml /tmp/
+
+  sleep 10
+
+  mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/
+  mv /tmp/kube-controller-manager.yaml /etc/kubernetes/manifests/
+  mv /tmp/kube-scheduler.yaml /etc/kubernetes/manifests/
+  mv /tmp/etcd.yaml /etc/kubernetes/manifests/
+
+  echo 'Ожидание запуска pods...'
+  sleep 30
+
+  # 3. Перезапустить kubelet
+  systemctl restart kubelet
+
+  # 4. Обновить admin kubeconfig
+  cp /etc/kubernetes/admin.conf /root/.kube/config
+
+  echo '========================================='
+  echo 'Готово на \$(hostname)'
+  echo '========================================='
+"
+
+# Проверка
+kubectl --kubeconfig=<(ssh root@$MASTER_IP cat /etc/kubernetes/admin.conf) get nodes
+
+# Повторить для master2 и master3
 ```
 
-Вы увидите список всех сертификатов с датами истечения:
-
+**Пример вывода:**
 ```
-CERTIFICATE                EXPIRES                  RESIDUAL TIME   CERTIFICATE AUTHORITY
-admin.conf                 Jan 18, 2026 12:00 UTC   364d            ca
-apiserver                  Jan 18, 2026 12:00 UTC   364d            ca
-apiserver-etcd-client      Jan 18, 2026 12:00 UTC   364d            etcd-ca
-apiserver-kubelet-client   Jan 18, 2026 12:00 UTC   364d            ca
-controller-manager.conf    Jan 18, 2026 12:00 UTC   364d            ca
-etcd-healthcheck-client    Jan 18, 2026 12:00 UTC   364d            etcd-ca
-etcd-peer                  Jan 18, 2026 12:00 UTC   364d            etcd-ca
-etcd-server                Jan 18, 2026 12:00 UTC   364d            etcd-ca
-front-proxy-client         Jan 18, 2026 12:00 UTC   364d            front-proxy-ca
-scheduler.conf             Jan 18, 2026 12:00 UTC   364d            ca
-```
-
-Проверьте текущие SAN для API Server:
-
-```bash
-openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -text | grep -A1 "Subject Alternative Name"
-```
-
-Запишите текущие SAN - kubeadm постарается их сохранить.
-
-Выйдите с ноды:
-
-```bash
-exit
-```
-
-## Создание резервных копий
-
-### Шаг 3: Создание бэкапа на master1
-
-Зайдите на master1:
-
-```bash
-ssh root@192.168.88.191
-```
-
-Создайте директорию для бэкапа:
-
-```bash
-BACKUP_DIR="/root/k8s-certs-backup-$(date +%Y%m%d_%H%M%S)"
-mkdir -p $BACKUP_DIR
-echo "Создана директория: $BACKUP_DIR"
-```
-
-Скопируйте все сертификаты:
-
-```bash
-cp -r /etc/kubernetes/pki $BACKUP_DIR/pki
-```
-
-Скопируйте kubeconfig файлы:
-
-```bash
-cp /etc/kubernetes/admin.conf $BACKUP_DIR/
-cp /etc/kubernetes/controller-manager.conf $BACKUP_DIR/
-cp /etc/kubernetes/scheduler.conf $BACKUP_DIR/
-cp /etc/kubernetes/kubelet.conf $BACKUP_DIR/
-```
-
-Скопируйте манифесты static pods:
-
-```bash
-cp -r /etc/kubernetes/manifests $BACKUP_DIR/manifests
-```
-
-Скопируйте kubelet сертификаты:
-
-```bash
-cp -r /var/lib/kubelet/pki $BACKUP_DIR/kubelet-pki 2>/dev/null || true
-```
-
-Проверьте бэкап:
-
-```bash
-ls -lah $BACKUP_DIR/
-echo "Бэкап сохранен в: $BACKUP_DIR"
-```
-
-Выйдите:
-
-```bash
-exit
-```
-
-### Шаг 4: Создание бэкапа на master2
-
-Повторите те же действия на master2:
-
-```bash
-ssh root@192.168.88.192
-BACKUP_DIR="/root/k8s-certs-backup-$(date +%Y%m%d_%H%M%S)"
-mkdir -p $BACKUP_DIR
-echo "Создана директория: $BACKUP_DIR"
-cp -r /etc/kubernetes/pki $BACKUP_DIR/pki
-cp /etc/kubernetes/admin.conf $BACKUP_DIR/
-cp /etc/kubernetes/controller-manager.conf $BACKUP_DIR/
-cp /etc/kubernetes/scheduler.conf $BACKUP_DIR/
-cp /etc/kubernetes/kubelet.conf $BACKUP_DIR/
-cp -r /etc/kubernetes/manifests $BACKUP_DIR/manifests
-cp -r /var/lib/kubelet/pki $BACKUP_DIR/kubelet-pki 2>/dev/null || true
-ls -lah $BACKUP_DIR/
-echo "Бэкап сохранен в: $BACKUP_DIR"
-exit
-```
-
-### Шаг 5: Создание бэкапа на master3
-
-```bash
-ssh root@192.168.88.193
-BACKUP_DIR="/root/k8s-certs-backup-$(date +%Y%m%d_%H%M%S)"
-mkdir -p $BACKUP_DIR
-echo "Создана директория: $BACKUP_DIR"
-cp -r /etc/kubernetes/pki $BACKUP_DIR/pki
-cp /etc/kubernetes/admin.conf $BACKUP_DIR/
-cp /etc/kubernetes/controller-manager.conf $BACKUP_DIR/
-cp /etc/kubernetes/scheduler.conf $BACKUP_DIR/
-cp /etc/kubernetes/kubelet.conf $BACKUP_DIR/
-cp -r /etc/kubernetes/manifests $BACKUP_DIR/manifests
-cp -r /var/lib/kubelet/pki $BACKUP_DIR/kubelet-pki 2>/dev/null || true
-ls -lah $BACKUP_DIR/
-echo "Бэкап сохранен в: $BACKUP_DIR"
-exit
-```
-
-## Регенерация сертификатов
-
-### Важное замечание о последовательности
-
-Вы можете обновлять master ноды **последовательно** (с минимальным downtime) или **одновременно** (быстрее, но кластер будет недоступен).
-
-Ниже описан **последовательный** метод (рекомендуется).
-
-### Шаг 6: Регенерация на master1
-
-Зайдите на master1:
-
-```bash
-ssh root@192.168.88.191
-```
-
-Регенерируйте все сертификаты:
-
-```bash
-kubeadm certs renew all
-```
-
-Вы увидите вывод:
-
-```
+=========================================
+Регенерация сертификатов на master1
+=========================================
 [renew] Reading configuration from the cluster...
 [renew] FYI: You can look at this config file with 'kubectl -n kube-system get cm kubeadm-config -o yaml'
 
@@ -263,224 +237,198 @@ certificate for the front proxy client renewed
 certificate embedded in the kubeconfig file for the scheduler manager to use renewed
 
 Done renewing certificates. You must restart the kube-apiserver, kube-controller-manager, kube-scheduler and etcd, so that they can use the new certificates.
+Ожидание запуска pods...
+=========================================
+Готово на master1
+=========================================
 ```
 
-Перезапустите static pods. Переместите манифесты во временную директорию:
+### Метод 2: Пошаговая регенерация (для продвинутых)
+
+**Регенерация отдельных компонентов:**
 
 ```bash
-mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/
-mv /etc/kubernetes/manifests/kube-controller-manager.yaml /tmp/
-mv /etc/kubernetes/manifests/kube-scheduler.yaml /tmp/
-mv /etc/kubernetes/manifests/etcd.yaml /tmp/
+# Только API Server
+kubeadm certs renew apiserver
+
+# Только API Server kubelet client
+kubeadm certs renew apiserver-kubelet-client
+
+# Только API Server etcd client
+kubeadm certs renew apiserver-etcd-client
+
+# Только etcd сертификаты
+kubeadm certs renew etcd-healthcheck-client
+kubeadm certs renew etcd-peer
+kubeadm certs renew etcd-server
+
+# Только Front Proxy
+kubeadm certs renew front-proxy-client
+
+# Kubeconfig файлы
+kubeadm certs renew admin.conf
+kubeadm certs renew controller-manager.conf
+kubeadm certs renew scheduler.conf
+
+# Посмотреть доступные команды
+kubeadm certs renew --help
 ```
 
-Подождите 10 секунд чтобы pods остановились:
+**После каждого обновления перезапустить соответствующие pods.**
+
+### Метод 3: Одновременное обновление всех master (для опытных)
+
+**ВАЖНО:** Кластер будет недоступен на время обновления!
 
 ```bash
+#!/bin/bash
+
+MASTER_NODES=(
+  "master1:192.168.88.191"
+  "master2:192.168.88.192"
+  "master3:192.168.88.193"
+)
+
+echo "ВНИМАНИЕ: Кластер будет ОСТАНОВЛЕН!"
+read -p "Продолжить? (YES): " confirm
+[[ "$confirm" != "YES" ]] && exit 1
+
+# 1. Остановить kubelet на всех нодах
+echo "[1/6] Остановка kubelet..."
+for node in "${MASTER_NODES[@]}"; do
+  IFS=':' read -r _ ip <<< "$node"
+  ssh root@$ip "systemctl stop kubelet" &
+done
+wait
+
+sleep 5
+
+# 2. Остановить etcd на всех нодах
+echo "[2/6] Остановка etcd..."
+for node in "${MASTER_NODES[@]}"; do
+  IFS=':' read -r _ ip <<< "$node"
+  ssh root@$ip "mv /etc/kubernetes/manifests/etcd.yaml /tmp/etcd.yaml.backup" &
+done
+wait
+
 sleep 10
-```
 
-Верните манифесты обратно:
+# 3. Регенерировать сертификаты на всех нодах параллельно
+echo "[3/6] Регенерация сертификатов..."
+for node in "${MASTER_NODES[@]}"; do
+  IFS=':' read -r hostname ip <<< "$node"
+  ssh root@$ip "kubeadm certs renew all" &
+done
+wait
 
-```bash
-mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/
-mv /tmp/kube-controller-manager.yaml /etc/kubernetes/manifests/
-mv /tmp/kube-scheduler.yaml /etc/kubernetes/manifests/
-mv /tmp/etcd.yaml /etc/kubernetes/manifests/
-```
+# 4. Запустить etcd одновременно
+echo "[4/6] Запуск etcd..."
+for node in "${MASTER_NODES[@]}"; do
+  IFS=':' read -r _ ip <<< "$node"
+  ssh root@$ip "mv /tmp/etcd.yaml.backup /etc/kubernetes/manifests/etcd.yaml" &
+done
+wait
 
-Подождите запуска pods:
+sleep 15
 
-```bash
-echo "Ожидание запуска pods..."
+# 5. Запустить kubelet
+echo "[5/6] Запуск kubelet..."
+for node in "${MASTER_NODES[@]}"; do
+  IFS=':' read -r _ ip <<< "$node"
+  ssh root@$ip "systemctl start kubelet" &
+done
+wait
+
 sleep 30
-```
 
-Перезапустите kubelet:
+# 6. Обновить локальный kubeconfig
+echo "[6/6] Обновление kubeconfig..."
+IFS=':' read -r _ master_ip <<< "${MASTER_NODES[0]}"
+scp root@$master_ip:/etc/kubernetes/admin.conf ~/.kube/config
 
-```bash
-systemctl restart kubelet
-```
-
-Обновите admin kubeconfig:
-
-```bash
-cp /etc/kubernetes/admin.conf /root/.kube/config
-```
-
-Проверьте статус:
-
-```bash
 kubectl get nodes
-kubectl get pods -n kube-system | grep -E 'apiserver|controller|scheduler|etcd'
+
+echo "Готово!"
 ```
 
-Если все работает - выйдите:
+## Модульное обновление
+
+### Обновление только API Server
 
 ```bash
-exit
-```
+# На master ноде
+kubeadm certs renew apiserver
 
-### Шаг 7: Регенерация на master2
-
-Зайдите на master2:
-
-```bash
-ssh root@192.168.88.192
-```
-
-Регенерируйте сертификаты:
-
-```bash
-kubeadm certs renew all
-```
-
-Перезапустите static pods:
-
-```bash
+# Перезапустить API Server pod
 mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/
-mv /etc/kubernetes/manifests/kube-controller-manager.yaml /tmp/
-mv /etc/kubernetes/manifests/kube-scheduler.yaml /tmp/
-mv /etc/kubernetes/manifests/etcd.yaml /tmp/
-sleep 10
+sleep 5
 mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/
-mv /tmp/kube-controller-manager.yaml /etc/kubernetes/manifests/
-mv /tmp/kube-scheduler.yaml /etc/kubernetes/manifests/
-mv /tmp/etcd.yaml /etc/kubernetes/manifests/
-echo "Ожидание запуска pods..."
-sleep 30
-```
 
-Перезапустите kubelet:
-
-```bash
-systemctl restart kubelet
-```
-
-Обновите kubeconfig:
-
-```bash
-cp /etc/kubernetes/admin.conf /root/.kube/config
-```
-
-Проверьте:
-
-```bash
-kubectl get nodes
-kubectl get pods -n kube-system | grep -E 'apiserver|controller|scheduler|etcd'
-```
-
-Выйдите:
-
-```bash
-exit
-```
-
-### Шаг 8: Регенерация на master3
-
-Зайдите на master3:
-
-```bash
-ssh root@192.168.88.193
-```
-
-Регенерируйте сертификаты:
-
-```bash
-kubeadm certs renew all
-```
-
-Перезапустите static pods:
-
-```bash
-mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/
-mv /etc/kubernetes/manifests/kube-controller-manager.yaml /tmp/
-mv /etc/kubernetes/manifests/kube-scheduler.yaml /tmp/
-mv /etc/kubernetes/manifests/etcd.yaml /tmp/
+# Проверка
 sleep 10
-mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/
-mv /tmp/kube-controller-manager.yaml /etc/kubernetes/manifests/
-mv /tmp/kube-scheduler.yaml /etc/kubernetes/manifests/
-mv /tmp/etcd.yaml /etc/kubernetes/manifests/
-echo "Ожидание запуска pods..."
-sleep 30
-```
-
-Перезапустите kubelet:
-
-```bash
-systemctl restart kubelet
-```
-
-Обновите kubeconfig:
-
-```bash
-cp /etc/kubernetes/admin.conf /root/.kube/config
-```
-
-Проверьте:
-
-```bash
 kubectl get nodes
-kubectl get pods -n kube-system | grep -E 'apiserver|controller|scheduler|etcd'
 ```
 
-Выйдите:
+### Обновление только etcd
 
 ```bash
-exit
+# На master ноде
+kubeadm certs renew etcd-server
+kubeadm certs renew etcd-peer
+kubeadm certs renew etcd-healthcheck-client
+
+# Перезапустить etcd pod
+mv /etc/kubernetes/manifests/etcd.yaml /tmp/
+sleep 5
+mv /tmp/etcd.yaml /etc/kubernetes/manifests/
+
+# Проверка
+sleep 15
+kubectl get nodes
 ```
 
-### Шаг 9: Обновление локального kubeconfig
-
-На вашей локальной машине обновите kubeconfig:
+### Обновление admin kubeconfig
 
 ```bash
+# На master ноде
+kubeadm certs renew admin.conf
+
+# Скопировать новый kubeconfig
+cp /etc/kubernetes/admin.conf ~/.kube/config
+
+# ИЛИ скачать на локальную машину
 scp root@192.168.88.191:/etc/kubernetes/admin.conf ~/.kube/config
-```
-
-Проверьте доступ:
-
-```bash
-kubectl get nodes
-kubectl get pods -A
 ```
 
 ## Проверка и тестирование
 
-### Шаг 10: Проверка сроков действия сертификатов
-
-Зайдите на любую master ноду:
+### Проверка 1: Сроки действия
 
 ```bash
-ssh root@192.168.88.191
-```
-
-Проверьте сроки:
-
-```bash
+# После регенерации проверить сроки
 kubeadm certs check-expiration
+
+# Ожидаемый вывод: все сертификаты должны иметь новый срок действия
+# RESIDUAL TIME должен быть ~364d (1 год)
 ```
 
-Все сертификаты должны показывать RESIDUAL TIME около 364d (1 год).
-
-Выйдите:
+### Проверка 2: Статус кластера
 
 ```bash
-exit
+# Ноды
+kubectl get nodes
+
+# Pods
+kubectl get pods -A
+
+# Control Plane компоненты
+kubectl get pods -n kube-system | grep -E 'apiserver|controller|scheduler|etcd'
 ```
 
-### Шаг 11: Проверка etcd health
-
-Зайдите на master1:
+### Проверка 3: etcd health
 
 ```bash
-ssh root@192.168.88.191
-```
-
-Проверьте etcd:
-
-```bash
+# На master ноде
 kubectl -n kube-system exec -it etcd-master1 -- sh -c "
   ETCDCTL_API=3 etcdctl \
     --endpoints=https://127.0.0.1:2379 \
@@ -489,57 +437,22 @@ kubectl -n kube-system exec -it etcd-master1 -- sh -c "
     --key=/etc/kubernetes/pki/etcd/server.key \
     endpoint health
 "
+
+# Ожидаемый вывод:
+# https://127.0.0.1:2379 is healthy: successfully committed proposal: took = 2.123456ms
 ```
 
-Ожидаемый вывод:
-
-```
-https://127.0.0.1:2379 is healthy: successfully committed proposal: took = 2.123456ms
-```
-
-Выйдите:
+### Проверка 4: Создание тестового pod
 
 ```bash
-exit
-```
-
-### Шаг 12: Проверка работы кластера
-
-На локальной машине проверьте ноды:
-
-```bash
-kubectl get nodes
-```
-
-Все ноды должны быть в статусе Ready.
-
-Проверьте pods:
-
-```bash
-kubectl get pods -A
-```
-
-Создайте тестовый pod:
-
-```bash
+# Создать
 kubectl run test-nginx --image=nginx --restart=Never
-```
 
-Подождите пока pod запустится:
-
-```bash
+# Проверить
 kubectl wait --for=condition=Ready pod/test-nginx --timeout=60s
-```
-
-Проверьте статус:
-
-```bash
 kubectl get pod test-nginx
-```
 
-Удалите тестовый pod:
-
-```bash
+# Удалить
 kubectl delete pod test-nginx
 ```
 
@@ -547,243 +460,248 @@ kubectl delete pod test-nginx
 
 ### Проблема 1: kubeadm не найден
 
-Зайдите на master ноду:
-
-```bash
-ssh root@192.168.88.191
-which kubeadm
-```
-
-Если команда не найдена:
-
+**Ошибка:**
 ```
 bash: kubeadm: command not found
 ```
 
-Это значит что кластер не установлен через kubeadm. Используйте OpenSSL или CFSSL методы.
+**Причина:** Кластер не установлен через kubeadm.
 
-### Проблема 2: etcd работает как systemd
+**Решение:**
+Используйте [OpenSSL](openssl.md) или [CFSSL](cfssl.md) методы.
 
-Проверьте:
+### Проблема 2: Сертификаты не обновляются
 
-```bash
-ssh root@192.168.88.191
+**Ошибка:**
+```
+[renew] Reading configuration from the cluster...
+error execution phase check-expiration: couldn't create a kubeadm-certs phase: cluster doesn't use kubeadm
+```
+
+**Причина:** Кластер не управляется через kubeadm.
+
+**Решение:**
+Используйте [OpenSSL](openssl.md) или [CFSSL](cfssl.md) методы.
+
+### Проблема 3: etcd systemd не поддерживается
+
+**Симптомы:**
+```
 ls /etc/kubernetes/manifests/etcd.yaml
-```
+# ls: cannot access '/etc/kubernetes/manifests/etcd.yaml': No such file or directory
 
-Если файла нет:
-
-```
-ls: cannot access '/etc/kubernetes/manifests/etcd.yaml': No such file or directory
-```
-
-Проверьте systemd:
-
-```bash
 systemctl status etcd
+# etcd.service - etcd
+#    Loaded: loaded (/etc/systemd/system/etcd.service; enabled; vendor preset: enabled)
+#    Active: active (running)
 ```
 
-Если etcd запущен как systemd service - kubeadm НЕ ПОДДЕРЖИВАЕТ это! Используйте OpenSSL или CFSSL методы.
+**Причина:** etcd работает как systemd service, не как static pod.
 
-### Проблема 3: API Server не запускается
+**Решение:**
+kubeadm НЕ ПОДДЕРЖИВАЕТ etcd systemd!
+Используйте [OpenSSL](openssl.md) или [CFSSL](cfssl.md) методы.
 
-Зайдите на проблемную ноду:
+### Проблема 4: API Server не запускается после регенерации
 
-```bash
-ssh root@192.168.88.191
+**Симптомы:**
+```
+kubectl get nodes
+# The connection to the server 192.168.88.191:6443 was refused
 ```
 
-Проверьте статус контейнеров:
-
+**Диагностика:**
 ```bash
+# Проверить статус API Server pod
 crictl ps -a | grep kube-apiserver
-```
 
-Проверьте логи:
-
-```bash
+# Проверить логи
 crictl logs <container-id>
 ```
 
-Если видите ошибку про сертификаты:
+**Частые причины:**
 
+**4.1. Неправильный SAN**
+
+**Логи:**
 ```
 x509: certificate is valid for ..., not <some-ip>
 ```
 
-Это означает проблему с SAN. kubeadm ограничен в кастомизации SAN. Используйте OpenSSL/CFSSL для полного контроля.
+**Решение:**
+kubeadm ограничен в кастомизации SAN. Используйте OpenSSL/CFSSL для полного контроля.
 
-### Проблема 4: Kubeconfig не работает
+**4.2. etcd не запущен**
 
-На локальной машине если видите ошибку:
+**Решение:**
+```bash
+# Проверить etcd pod
+crictl ps | grep etcd
 
+# Если нет - проверить манифест
+ls /etc/kubernetes/manifests/etcd.yaml
+
+# Запустить
+mv /tmp/etcd.yaml.backup /etc/kubernetes/manifests/etcd.yaml
+```
+
+### Проблема 5: Мульти-master кластер не работает
+
+**Симптомы:**
+После обновления одной ноды, другие ноды не могут подключиться к etcd.
+
+**Причина:**
+etcd peer communication использует сертификаты. Если обновить только одну ноду - peer auth fails.
+
+**Решение:**
+1. Обновить все master ноды одновременно (Метод 3)
+2. ИЛИ использовать OpenSSL/CFSSL для контроля над процессом
+
+### Проблема 6: Kubeconfig не работает
+
+**Симптомы:**
 ```
 Unable to connect to the server: x509: certificate signed by unknown authority
 ```
 
-Обновите kubeconfig:
-
+**Решение:**
 ```bash
-scp root@192.168.88.191:/etc/kubernetes/admin.conf ~/.kube/config
-```
-
-### Проблема 5: etcd peer communication failed
-
-Если после обновления одной master ноды другие не могут подключиться к etcd, это означает проблемы с peer сертификатами.
-
-Решение: обновите все master ноды последовательно как описано выше.
-
-## Ограничения
-
-### 1. Срок действия фиксирован на 1 год
-
-kubeadm генерирует сертификаты только на 1 год (365 дней). Нет простого способа это изменить.
-
-Если нужен больший срок - используйте OpenSSL или CFSSL методы.
-
-### 2. Ограниченная кастомизация SAN
-
-kubeadm автоматически определяет SAN, но сложно добавить кастомные IP/DNS.
-
-Для полного контроля - используйте OpenSSL или CFSSL методы.
-
-### 3. Не меняет CA
-
-```bash
-kubeadm certs renew all
-```
-
-Эта команда обновляет только leaf сертификаты. CA остается прежним.
-
-Если нужно заменить CA - используйте OpenSSL или CFSSL методы.
-
-### 4. Только для kubeadm кластеров
-
-kubeadm НЕ РАБОТАЕТ для:
-- Кластеров установленных через Kubespray
-- Кластеров установленных через Ansible
-- Кластеров установленных вручную
-- Managed Kubernetes (EKS, GKE, AKS)
-
-### 5. Только etcd static pod
-
-kubeadm работает только с etcd static pod. Если etcd работает как systemd service (типично для Kubespray) - используйте OpenSSL или CFSSL методы.
-
-## Частичное обновление сертификатов
-
-Если нужно обновить только определенные сертификаты, можно использовать отдельные команды.
-
-### Обновление только API Server
-
-Зайдите на master ноду:
-
-```bash
-ssh root@192.168.88.191
-```
-
-Обновите сертификат API Server:
-
-```bash
-kubeadm certs renew apiserver
-```
-
-Перезапустите API Server pod:
-
-```bash
-mv /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/
-sleep 5
-mv /tmp/kube-apiserver.yaml /etc/kubernetes/manifests/
-sleep 10
-```
-
-Проверьте:
-
-```bash
-kubectl get nodes
-```
-
-### Обновление только etcd сертификатов
-
-```bash
-kubeadm certs renew etcd-server
-kubeadm certs renew etcd-peer
-kubeadm certs renew etcd-healthcheck-client
-```
-
-Перезапустите etcd:
-
-```bash
-mv /etc/kubernetes/manifests/etcd.yaml /tmp/
-sleep 5
-mv /tmp/etcd.yaml /etc/kubernetes/manifests/
-sleep 15
-```
-
-### Обновление только admin kubeconfig
-
-```bash
+# Обновить admin.conf
 kubeadm certs renew admin.conf
-```
 
-Скопируйте новый kubeconfig:
-
-```bash
+# Скопировать новый kubeconfig
 cp /etc/kubernetes/admin.conf ~/.kube/config
 ```
 
-Или скачайте на локальную машину:
+## Ограничения
+
+### Ограничение 1: Срок действия фиксирован
+
+kubeadm генерирует сертификаты на **1 год** (365 дней).
+
+**Обход:**
+```bash
+# НЕТ простого способа изменить через kubeadm!
+
+# Вариант 1: Регенерировать вручную через OpenSSL/CFSSL
+
+# Вариант 2: Изменить код kubeadm и пересобрать (НЕ РЕКОМЕНДУЕТСЯ)
+
+# Вариант 3: Настроить автоматическую ротацию (рекомендуется)
+# Используйте cert-manager или cron job для регулярной регенерации
+```
+
+### Ограничение 2: Кастомизация SAN
+
+kubeadm автоматически определяет SAN, но не позволяет легко добавлять кастомные.
+
+**Обход:**
+```bash
+# Отредактировать kubeadm-config (сложно и может не сработать)
+
+# ИЛИ использовать OpenSSL/CFSSL для полного контроля
+```
+
+### Ограничение 3: Не меняет CA
 
 ```bash
-exit  # выйти с master ноды
-scp root@192.168.88.191:/etc/kubernetes/admin.conf ~/.kube/config
+kubeadm certs renew all
+
+# Обновляет только leaf сертификаты!
+# CA остается прежним
 ```
 
-### Список доступных команд
+**Если нужно заменить CA:**
+Используйте [OpenSSL](openssl.md) или [CFSSL](cfssl.md) методы.
 
-Посмотреть все доступные опции:
+### Ограничение 4: Только для kubeadm кластеров
+
+**Не работает для:**
+- Kubespray установок
+- Ansible установок
+- Ручных установок
+- Managed Kubernetes (EKS, GKE, AKS)
+
+**Решение:**
+Используйте [OpenSSL](openssl.md) или [CFSSL](cfssl.md) методы.
+
+### Ограничение 5: etcd systemd не поддерживается
+
+kubeadm работает только с etcd static pod.
+
+**Если у вас etcd systemd (Kubespray):**
+Используйте [OpenSSL](openssl.md) или [CFSSL](cfssl.md) методы.
+
+## Автоматизация регенерации
+
+### Cron job для автоматической ротации
 
 ```bash
-ssh root@192.168.88.191
-kubeadm certs renew --help
+# Создать скрипт
+cat > /usr/local/bin/k8s-renew-certs.sh <<'EOF'
+#!/bin/bash
+
+LOG_FILE="/var/log/k8s-cert-renew.log"
+
+echo "$(date): Starting certificate renewal" >> $LOG_FILE
+
+# Регенерировать
+kubeadm certs renew all >> $LOG_FILE 2>&1
+
+# Перезапустить static pods
+kubectl -n kube-system delete pod -l component=kube-apiserver >> $LOG_FILE 2>&1
+kubectl -n kube-system delete pod -l component=kube-controller-manager >> $LOG_FILE 2>&1
+kubectl -n kube-system delete pod -l component=kube-scheduler >> $LOG_FILE 2>&1
+kubectl -n kube-system delete pod -l component=etcd >> $LOG_FILE 2>&1
+
+# Перезапустить kubelet
+systemctl restart kubelet >> $LOG_FILE 2>&1
+
+echo "$(date): Certificate renewal completed" >> $LOG_FILE
+EOF
+
+chmod +x /usr/local/bin/k8s-renew-certs.sh
+
+# Добавить в cron (каждый месяц)
+echo "0 2 1 * * /usr/local/bin/k8s-renew-certs.sh" | crontab -
 ```
 
-Вывод:
-
-```
-Available Commands:
-  all                      Renew all certificates
-  admin.conf               Renew the admin.conf certificate
-  apiserver                Renew the API server certificate
-  apiserver-etcd-client    Renew the etcd client certificate for the API server
-  apiserver-kubelet-client Renew the kubelet client certificate for the API server
-  controller-manager.conf  Renew the controller-manager.conf certificate
-  etcd-healthcheck-client  Renew the healthcheck client certificate for etcd
-  etcd-peer                Renew the peer certificate for etcd
-  etcd-server              Renew the server certificate for etcd
-  front-proxy-client       Renew the front-proxy client certificate
-  scheduler.conf           Renew the scheduler.conf certificate
-```
+**ВАЖНО:** Это простой пример. Для production используйте cert-manager или Vault.
 
 ## Заключение
 
-kubeadm метод - самый простой и быстрый для регенерации сертификатов, но работает только для кластеров установленных через kubeadm и имеет ограничения.
+kubeadm метод - самый быстрый для простых сценариев, но с существенными ограничениями.
+
+**Преимущества:**
+- Быстро (одна команда)
+- Просто
+- Официально поддерживается
+
+**Недостатки:**
+- Только для kubeadm кластеров
+- Только etcd static-pod
+- Ограниченная кастомизация
+- Фиксированный срок действия (1 год)
+- Не меняет CA
+
+**Рекомендации:**
 
 **Используйте kubeadm если:**
 - Кластер установлен через kubeadm
-- etcd работает как static pod
-- Нужно быстро продлить срок действия сертификатов
-- Нет специфичных требований к SAN или сроку действия
+- Нужно быстро продлить срок действия
+- Нет специфичных требований
 
-**Используйте OpenSSL или CFSSL если:**
-- Кластер НЕ установлен через kubeadm (Kubespray, Ansible, вручную)
-- etcd работает как systemd service
+**Используйте OpenSSL/CFSSL если:**
+- Кластер НЕ установлен через kubeadm
+- etcd работает как systemd
 - Нужны кастомные SAN
-- Нужен срок действия больше 1 года
+- Нужен длительный срок действия (>1 год)
 - Нужно заменить CA
-- Требуется полный контроль над процессом
+- Требуется полный контроль
 
-**Дополнительные материалы:**
-- [OpenSSL метод](openssl.md) - полный ручной контроль
-- [CFSSL метод](cfssl.md) - альтернативный подход
-- [Сравнение методов](README.md)
+**Дальнейшее чтение:**
 - [kubeadm certs документация](https://kubernetes.io/docs/tasks/administer-cluster/kubeadm/kubeadm-certs/)
+- [OpenSSL метод](openssl.md)
+- [CFSSL метод](cfssl.md)
+- [Сравнение методов](README.md)
+- [cert-manager для автоматической ротации](https://cert-manager.io/)
