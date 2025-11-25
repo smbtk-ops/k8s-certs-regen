@@ -315,7 +315,8 @@ sleep 30
 
 # Копирование kubelet сертификатов на worker ноды
 log_info "Копирование kubelet сертификатов на worker ноды..."
-for node in $WORKER_NODES; do
+ALL_NODES="$MASTER_NODES $WORKER_NODES"
+for node in $ALL_NODES; do
     IFS=':' read -r hostname ip <<< "$node"
     log_info "Копирование kubelet сертификатов на $hostname..."
 
