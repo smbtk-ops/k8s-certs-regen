@@ -313,49 +313,82 @@ wait
 log_info "Ожидание перезапуска API servers (30 секунд)..."
 sleep 30
 
-# Копирование kubelet сертификатов на worker ноды
-log_info "Копирование kubelet сертификатов на worker ноды..."
+# Копирование kubelet сертификатов и CA на все ноды (master + worker)
+log_info "Копирование kubelet сертификатов и CA на все ноды..."
 ALL_NODES="$MASTER_NODES $WORKER_NODES"
+
+# Определяем API server endpoint для kubelet.conf
+if [ "$USE_VIP" = "true" ]; then
+    API_SERVER_ENDPOINT="https://${LB_VIP}:6443"
+else
+    API_SERVER_ENDPOINT="https://${MASTER_IP}:6443"
+fi
+
+CA_BASE64=$(base64 -i "$PROJECT_DIR/certs/ca/ca.crt" | tr -d '\n')
+
 for node in $ALL_NODES; do
     IFS=':' read -r hostname ip <<< "$node"
-    log_info "Копирование kubelet сертификатов на $hostname..."
+    log_info "Копирование kubelet сертификатов и CA на $hostname..."
 
+    # Копируем kubelet сертификаты и CA
     scp -i "$SSH_KEY_PATH" \
         "$PROJECT_DIR/certs/kubelet/$hostname/kubelet.crt" \
         "$PROJECT_DIR/certs/kubelet/$hostname/kubelet.key" \
+        "$PROJECT_DIR/certs/ca/ca.crt" \
         "$SSH_USER@$ip:/tmp/" || {
-        log_error "Не удалось скопировать kubelet сертификаты на $hostname"
+        log_error "Не удалось скопировать сертификаты на $hostname"
         exit 1
     }
 
     ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "
+        # Обновляем CA сертификат для kubelet authentication
+        cp /tmp/ca.crt /etc/kubernetes/ssl/ca.crt
+        chmod 644 /etc/kubernetes/ssl/ca.crt
+
+        # Обновляем kubelet сертификаты
         mv /tmp/kubelet.crt /var/lib/kubelet/pki/kubelet.crt
         mv /tmp/kubelet.key /var/lib/kubelet/pki/kubelet.key
         chmod 644 /var/lib/kubelet/pki/kubelet.crt
         chmod 600 /var/lib/kubelet/pki/kubelet.key
-    "
-done
 
-# Обновление kubelet.conf на всех нодах (master + worker)
-log_info "Обновление kubelet.conf на всех нодах..."
-CA_BASE64=$(base64 -i "$PROJECT_DIR/certs/ca/ca.crt" | tr -d '\n')
-
-ALL_NODES="$MASTER_NODES $WORKER_NODES"
-for node in $ALL_NODES; do
-    IFS=':' read -r hostname ip <<< "$node"
-    log_info "Обновление kubelet.conf на $hostname..."
-
-    ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" bash -s << EOF
-        # Обновляем certificate-authority-data в kubelet.conf
-        sed -i.bak "s|certificate-authority-data:.*|certificate-authority-data: $CA_BASE64|" /etc/kubernetes/kubelet.conf
-
-        # Пересоздаем kubelet-client-current.pem
+        # Создаем kubelet-client-current.pem
         cat /var/lib/kubelet/pki/kubelet.crt /var/lib/kubelet/pki/kubelet.key > /var/lib/kubelet/pki/kubelet-client-current.pem
         chmod 600 /var/lib/kubelet/pki/kubelet-client-current.pem
 
+        # Создаем или обновляем kubelet.conf
+        if [ ! -f /etc/kubernetes/kubelet.conf ]; then
+            echo 'Создание /etc/kubernetes/kubelet.conf'
+            cat > /etc/kubernetes/kubelet.conf <<KUBECONFIG_EOF
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: $CA_BASE64
+    server: $API_SERVER_ENDPOINT
+  name: default-cluster
+contexts:
+- context:
+    cluster: default-cluster
+    namespace: default
+    user: default-auth
+  name: default-context
+current-context: default-context
+kind: Config
+preferences: {}
+users:
+- name: default-auth
+  user:
+    client-certificate: /var/lib/kubelet/pki/kubelet-client-current.pem
+    client-key: /var/lib/kubelet/pki/kubelet-client-current.pem
+KUBECONFIG_EOF
+            chmod 600 /etc/kubernetes/kubelet.conf
+        else
+            echo 'Обновление certificate-authority-data в /etc/kubernetes/kubelet.conf'
+            sed -i.bak \"s|certificate-authority-data:.*|certificate-authority-data: $CA_BASE64|\" /etc/kubernetes/kubelet.conf
+        fi
+
         # Перезапускаем kubelet
         systemctl restart kubelet
-EOF
+    "
 done
 
 log_info "Ожидание регистрации нод (30 секунд)..."
@@ -387,52 +420,4 @@ log_info "Проверьте состояние кластера:"
 log_info "  kubectl get nodes"
 log_info "  kubectl get pods -A"
 
-# Функция отката
-rollback_all() {
-    log_warning "========================================="
-    log_warning "ОТКАТ ИЗМЕНЕНИЙ НА ВСЕХ НОДАХ"
-    log_warning "========================================="
 
-    for node in $MASTER_NODES; do
-        IFS=':' read -r hostname ip <<< "$node"
-
-        log_info "Откат на $hostname..."
-        ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "
-            BACKUP_DIR=\$(cat /tmp/last-backup-dir)
-            systemctl stop kubelet || true
-            systemctl stop etcd || true
-
-            rm -rf /etc/kubernetes/ssl
-            cp -r \$BACKUP_DIR/kubernetes-ssl /etc/kubernetes/ssl
-
-            rm -rf /etc/ssl/etcd
-            cp -r \$BACKUP_DIR/etcd /etc/ssl/
-
-            if [ -d \$BACKUP_DIR/kubelet-pki ]; then
-                rm -rf /var/lib/kubelet/pki
-                cp -r \$BACKUP_DIR/kubelet-pki /var/lib/kubelet/pki
-            fi
-
-            echo \"Откат выполнен на $hostname\"
-        " &
-    done
-    wait
-
-    log_info "Запуск etcd на всех нодах..."
-    for node in $MASTER_NODES; do
-        IFS=':' read -r hostname ip <<< "$node"
-        ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "systemctl start etcd" &
-    done
-    wait
-
-    sleep 5
-
-    log_info "Запуск kubelet на всех нодах..."
-    for node in $MASTER_NODES; do
-        IFS=':' read -r hostname ip <<< "$node"
-        ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "systemctl start kubelet" &
-    done
-    wait
-
-    log_success "Откат завершен"
-}

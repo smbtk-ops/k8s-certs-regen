@@ -77,12 +77,22 @@ check_key "$CERTS_DIR/apiserver/apiserver-etcd-client.key" "API Server etcd Clie
 
 # Проверка etcd сертификатов
 log_info "Проверка etcd сертификатов"
-check_cert "$CERTS_DIR/etcd/server.crt" "etcd Server"
-check_key "$CERTS_DIR/etcd/server.key" "etcd Server Key"
-check_cert "$CERTS_DIR/etcd/peer.crt" "etcd Peer"
-check_key "$CERTS_DIR/etcd/peer.key" "etcd Peer Key"
-check_cert "$CERTS_DIR/etcd/healthcheck-client.crt" "etcd Healthcheck Client"
-check_key "$CERTS_DIR/etcd/healthcheck-client.key" "etcd Healthcheck Client Key"
+
+# Проверка shared сертификатов
+log_info "Проверка etcd shared сертификатов"
+check_cert "$CERTS_DIR/etcd/shared/healthcheck-client.crt" "etcd Healthcheck Client"
+check_key "$CERTS_DIR/etcd/shared/healthcheck-client.key" "etcd Healthcheck Client Key"
+
+# Проверка сертификатов для каждого узла
+for node in $MASTER_NODES; do
+    hostname="${node%%:*}"
+    log_info "Проверка etcd сертификатов для $hostname"
+
+    check_cert "$CERTS_DIR/etcd/$hostname/server.crt" "etcd Server ($hostname)"
+    check_key "$CERTS_DIR/etcd/$hostname/server.key" "etcd Server Key ($hostname)"
+    check_cert "$CERTS_DIR/etcd/$hostname/peer.crt" "etcd Peer ($hostname)"
+    check_key "$CERTS_DIR/etcd/$hostname/peer.key" "etcd Peer Key ($hostname)"
+done
 
 # Проверка Controller Manager сертификатов
 log_info "Проверка Controller Manager сертификатов"

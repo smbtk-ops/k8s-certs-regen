@@ -163,7 +163,12 @@ ETCD_TYPE="auto"
 5. Одновременный запуск etcd кластера на всех нодах
 6. Обновление kubeconfig файлов с новым CA
 7. Запуск kubelet и перезапуск control plane компонентов
-8. Обновление kubelet сертификатов на всех нодах
+8. Обновление kubelet сертификатов и CA на всех нодах (master + worker)
+   - Копирование нового CA (`ca.crt`) в `/etc/kubernetes/ssl/ca.crt`
+   - Копирование kubelet сертификатов (`kubelet.crt`, `kubelet.key`)
+   - Создание `/var/lib/kubelet/pki/kubelet-client-current.pem`
+   - Создание или обновление `/etc/kubernetes/kubelet.conf` с новым CA
+   - Перезапуск kubelet на всех нодах
 9. Финальная проверка работоспособности
 
 ### 5. Финальная проверка
@@ -198,6 +203,9 @@ ssh root@192.168.88.191 "
 
 # Проверка срока действия сертификата
 openssl x509 -in /etc/kubernetes/ssl/apiserver.crt -noout -dates
+
+# Проверка логов подов (убедиться что kubectl logs работает)
+kubectl logs -n kube-system <pod-name> --tail=10
 ```
 
 ## Структура проекта
@@ -359,6 +367,61 @@ kubectl get svc kubernetes -o yaml | grep clusterIP
 ```
 
 **Примечание:** Скрипт `apply-all-at-once.sh` теперь автоматически перезапускает Calico pods для обновления CA.
+
+### Проблема 7: Не работают логи подов (kubectl logs)
+
+**Симптомы:**
+```bash
+kubectl logs <pod-name>
+error: You must be logged in to the server (the server has asked for the client to provide credentials)
+```
+
+**Логи kubelet показывают:**
+```
+Unable to authenticate the request due to an error: verifying certificate SN=..., failed: x509: certificate signed by unknown authority
+```
+
+**Причина:** После регенерации сертификатов CA файл `/etc/kubernetes/ssl/ca.crt` на нодах не был обновлён. Kubelet использует этот файл (через параметр `clientCAFile` в `/var/lib/kubelet/config.yaml`) для проверки клиентских сертификатов API server при запросах к kubelet API (логи, exec, port-forward).
+
+**Решение:**
+
+Скрипт `apply-all-at-once.sh` (версия от 25.11.2025 и новее) автоматически обновляет CA на всех нодах. Если вы используете старую версию или столкнулись с этой проблемой, исправьте вручную:
+
+```bash
+# На всех нодах (master и worker)
+for node_ip in 192.168.88.191 192.168.88.192 192.168.88.193 192.168.88.194 192.168.88.195; do
+    echo "Обновление CA на $node_ip..."
+    scp -i ~/.ssh/id_ed25519 certs/ca/ca.crt root@$node_ip:/tmp/ca-new.crt
+    ssh -i ~/.ssh/id_ed25519 root@$node_ip "
+        cp /etc/kubernetes/ssl/ca.crt /etc/kubernetes/ssl/ca.crt.old
+        mv /tmp/ca-new.crt /etc/kubernetes/ssl/ca.crt
+        chmod 644 /etc/kubernetes/ssl/ca.crt
+        systemctl restart kubelet
+    "
+done
+
+# Подождать несколько секунд и проверить
+sleep 10
+kubectl logs <pod-name>
+```
+
+**Дополнительно:** Если файл `/etc/kubernetes/kubelet.conf` отсутствует или содержит старый CA, также обновите его:
+
+```bash
+CA_BASE64=$(base64 -i certs/ca/ca.crt | tr -d '\n')
+ssh -i ~/.ssh/id_ed25519 root@<node-ip> "
+    if [ -f /etc/kubernetes/kubelet.conf ]; then
+        sed -i.bak \"s|certificate-authority-data:.*|certificate-authority-data: $CA_BASE64|\" /etc/kubernetes/kubelet.conf
+    fi
+    systemctl restart kubelet
+"
+```
+
+**Примечание:** Скрипт `apply-all-at-once.sh` (обновлённая версия) автоматически:
+- Копирует новый CA (`ca.crt`) на все ноды в `/etc/kubernetes/ssl/ca.crt`
+- Обновляет или создаёт `/etc/kubernetes/kubelet.conf` с новым CA
+- Создаёт `/var/lib/kubelet/pki/kubelet-client-current.pem`
+- Перезапускает kubelet на всех нодах
 
 ## Откат изменений
 

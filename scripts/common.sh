@@ -71,16 +71,11 @@ check_required_vars() {
     fi
 
     # Проверка допустимости значения ETCD_TYPE
-    case "${ETCD_TYPE,,}" in
+    ETCD_TYPE_LOWER=$(echo "$ETCD_TYPE" | tr '[:upper:]' '[:lower:]')
+    case "$ETCD_TYPE_LOWER" in
         auto|systemd|static-pod)
             # Нормализация значения
-            if [[ "${ETCD_TYPE,,}" == "auto" ]]; then
-                ETCD_TYPE="auto"
-            elif [[ "${ETCD_TYPE,,}" == "systemd" ]]; then
-                ETCD_TYPE="systemd"
-            elif [[ "${ETCD_TYPE,,}" == "static-pod" ]]; then
-                ETCD_TYPE="static-pod"
-            fi
+            ETCD_TYPE="$ETCD_TYPE_LOWER"
             ;;
         *)
             log_error "ETCD_TYPE должен быть 'auto', 'systemd' или 'static-pod', получено: '$ETCD_TYPE'"
@@ -94,7 +89,8 @@ validate_vip_config() {
     local use_vip="${USE_VIP:-false}"
 
     # Нормализация значения USE_VIP (поддержка true/false, yes/no, 1/0)
-    case "${use_vip,,}" in
+    use_vip_lower=$(echo "$use_vip" | tr '[:upper:]' '[:lower:]')
+    case "$use_vip_lower" in
         true|yes|1)
             USE_VIP="true"
             ;;
@@ -263,19 +259,19 @@ detect_etcd_type() {
     local node_ip="$1"
     local detected_type="unknown"
 
-    log_info "Определение типа etcd на $node_ip..."
+    log_info "Определение типа etcd на $node_ip..." >&2
 
     # Проверка systemd
     if ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "systemctl is-active etcd >/dev/null 2>&1"; then
         detected_type="systemd"
-        log_info "Обнаружен etcd как systemd service"
+        log_info "Обнаружен etcd как systemd service" >&2
     # Проверка static pod
     elif ssh -i "$SSH_KEY_PATH" "$SSH_USER@$node_ip" "[ -f /etc/kubernetes/manifests/etcd.yaml ]"; then
         detected_type="static-pod"
-        log_info "Обнаружен etcd как static pod"
+        log_info "Обнаружен etcd как static pod" >&2
     else
-        log_error "Не удалось определить тип etcd на $node_ip"
-        log_error "Проверьте что etcd запущен на этой ноде"
+        log_error "Не удалось определить тип etcd на $node_ip" >&2
+        log_error "Проверьте что etcd запущен на этой ноде" >&2
         exit 1
     fi
 
@@ -400,4 +396,54 @@ determine_etcd_type() {
 
     # Экспортируем для использования в других частях скрипта
     export ETCD_TYPE
+}
+
+# Откат изменений на всех нодах
+rollback_all() {
+    log_warning "========================================="
+    log_warning "ОТКАТ ИЗМЕНЕНИЙ НА ВСЕХ НОДАХ"
+    log_warning "========================================="
+
+    for node in $MASTER_NODES; do
+        IFS=':' read -r hostname ip <<< "$node"
+
+        log_info "Откат на $hostname..."
+        ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "
+            BACKUP_DIR=\$(cat /tmp/last-backup-dir)
+            systemctl stop kubelet || true
+            systemctl stop etcd || true
+
+            rm -rf /etc/kubernetes/ssl
+            cp -r \$BACKUP_DIR/kubernetes-ssl /etc/kubernetes/ssl
+
+            rm -rf /etc/ssl/etcd
+            cp -r \$BACKUP_DIR/etcd /etc/ssl/
+
+            if [ -d \$BACKUP_DIR/kubelet-pki ]; then
+                rm -rf /var/lib/kubelet/pki
+                cp -r \$BACKUP_DIR/kubelet-pki /var/lib/kubelet/pki
+            fi
+
+            echo \"Откат выполнен на $hostname\"
+        " &
+    done
+    wait
+
+    log_info "Запуск etcd на всех нодах..."
+    for node in $MASTER_NODES; do
+        IFS=':' read -r hostname ip <<< "$node"
+        ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "systemctl start etcd" &
+    done
+    wait
+
+    sleep 5
+
+    log_info "Запуск kubelet на всех нодах..."
+    for node in $MASTER_NODES; do
+        IFS=':' read -r hostname ip <<< "$node"
+        ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "systemctl start kubelet" &
+    done
+    wait
+
+    log_success "Откат завершен"
 }
