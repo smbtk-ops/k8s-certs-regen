@@ -447,3 +447,29 @@ rollback_all() {
 
     log_success "Откат завершен"
 }
+
+# Очистка backup файлов после успешного применения
+cleanup_backups() {
+    log_info "Очистка backup файлов на всех нодах..."
+
+    for node in $MASTER_NODES; do
+        IFS=':' read -r hostname ip <<< "$node"
+
+        log_info "Очистка backups на $hostname..."
+        ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "
+            # Удаление .backup файлов в /etc/kubernetes
+            find /etc/kubernetes -name '*.backup-*' -type f -delete 2>/dev/null || true
+
+            # Удаление директорий с backup'ами
+            rm -rf /etc/kubernetes/k8s-certs-backup-* 2>/dev/null || true
+
+            # Удаление файла с путем к последнему backup
+            rm -f /tmp/last-backup-dir 2>/dev/null || true
+
+            echo \"Backup файлы удалены на $hostname\"
+        " &
+    done
+    wait
+
+    log_success "Backup файлы очищены на всех нодах"
+}

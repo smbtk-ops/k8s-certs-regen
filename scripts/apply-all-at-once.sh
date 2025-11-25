@@ -91,7 +91,7 @@ for node in $MASTER_NODES; do
 
     log_info "Backup на $hostname..."
     ssh -i "$SSH_KEY_PATH" "$SSH_USER@$ip" "
-        BACKUP_DIR=/root/k8s-certs-backup-\$(date +%Y%m%d-%H%M%S)
+        BACKUP_DIR=/etc/kubernetes/k8s-certs-backup-\$(date +%Y%m%d-%H%M%S)
         mkdir -p \$BACKUP_DIR
         cp -r /etc/kubernetes/ssl \$BACKUP_DIR/kubernetes-ssl
         cp -r /etc/ssl/etcd \$BACKUP_DIR/etcd
@@ -415,6 +415,9 @@ ssh -i "$SSH_KEY_PATH" "$SSH_USER@$FIRST_MASTER_IP" "kubectl --kubeconfig=/etc/k
 log_success "========================================="
 log_success "КЛАСТЕР УСПЕШНО ОБНОВЛЕН!"
 log_success "========================================="
+
+# Очистка backup файлов
+cleanup_backups
 
 log_info "Проверьте состояние кластера:"
 log_info "  kubectl get nodes"
